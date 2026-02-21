@@ -46,9 +46,13 @@ ROM_EXTENSIONS = {
     ".pbp", ".cso",
     ".zip", ".7z",
     ".rvz", ".gcz", ".wbfs",
+    ".m3u",
 }
 
 SKIP_IF_BETTER = {".bin": [".cue", ".chd"], ".iso": [".chd"]}
+
+# Disc file patterns — skip individual discs when an .m3u playlist exists
+DISC_PATTERN = re.compile(r"^(.+?)\s*\(Disc\s*\d+\)", re.IGNORECASE)
 
 SYSTEM_LABELS = {
     "psx": "PlayStation", "ps2": "PlayStation 2", "psp": "PSP",
@@ -163,6 +167,12 @@ def main():
         files = sorted(os.listdir(sys_dir))
         fileset = set(f.lower() for f in files)
 
+        # Build set of game bases that have .m3u playlists
+        m3u_bases = set()
+        for f in files:
+            if f.lower().endswith(".m3u"):
+                m3u_bases.add(os.path.splitext(f)[0].lower())
+
         for f in files:
             ext = os.path.splitext(f)[1].lower()
             if ext not in ROM_EXTENSIONS:
@@ -177,6 +187,14 @@ def main():
                         break
                 if skip:
                     continue
+
+            # Skip individual disc files when an .m3u playlist exists
+            if ext != ".m3u":
+                disc_match = DISC_PATTERN.match(os.path.splitext(f)[0])
+                if disc_match:
+                    base_name = disc_match.group(1).strip()
+                    if base_name.lower() in m3u_bases:
+                        continue
 
             gamename = clean_name(f)
             if gamename in seen_names:
