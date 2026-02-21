@@ -1,0 +1,13 @@
+version: "3.8"
+services:
+  crawler:
+    build: .
+    ports:
+      - "${CRAWLER_PORT:-7072}:7072"
+    volumes:
+      - ../config.env:/config/config.env:ro
+      - staging:/staging
+    restart: unless-stopped
+
+volumes:
+  staging:

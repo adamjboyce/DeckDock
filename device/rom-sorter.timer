@@ -1,0 +1,9 @@
+[Unit]
+Description=DeckDock — Run ROM Sorter every 30 seconds
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=30
+
+[Install]
+WantedBy=timers.target

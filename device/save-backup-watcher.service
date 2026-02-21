@@ -1,0 +1,12 @@
+[Unit]
+Description=DeckDock — Watch for suspend and backup saves
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/DeckDock/device/sleep-watcher.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

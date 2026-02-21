@@ -1,0 +1,7 @@
+[Unit]
+Description=DeckDock — ROM Sorter
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash %h/DeckDock/device/rom-sorter.sh
+ExecStartPost=/bin/bash %h/DeckDock/device/drop-cleaner.sh

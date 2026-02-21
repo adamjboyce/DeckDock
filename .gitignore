@@ -1,0 +1,9 @@
+config.env
+*.pyc
+__pycache__/
+.crawler-state.json
+*.part
+nas-staging/
+.local/
+node_modules/
+.env

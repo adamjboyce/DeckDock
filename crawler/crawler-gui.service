@@ -1,0 +1,13 @@
+[Unit]
+Description=DeckDock Crawler GUI
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/DeckDock/crawler/crawler-gui.py
+WorkingDirectory=%h/DeckDock
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
