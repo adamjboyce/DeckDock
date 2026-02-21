@@ -1317,7 +1317,7 @@ class CrawlJob:
                 context.close()
                 return None, None
 
-            # Click and wait for the download to start (2 min to begin, 5 min to finish)
+            # Click and wait for the download to start (2 min to begin)
             self._log("  Browser: clicking download button...")
             with page.expect_download(timeout=120000) as dl_info:
                 download_btn.click()
@@ -1331,7 +1331,18 @@ class CrawlJob:
                 self._log(f"  Browser: download failed — {fail}")
                 context.close()
                 return None, None
-            download.save_as(save_path)
+            # save_as can hang forever if server accepts but never sends data.
+            # Run it in a thread with a 3-minute timeout.
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                fut = pool.submit(download.save_as, save_path)
+                try:
+                    fut.result(timeout=180)
+                except concurrent.futures.TimeoutError:
+                    download.cancel()
+                    self._log("  Browser: download timed out (3 min with no data)")
+                    context.close()
+                    return None, None
 
             self._log(f"  Browser: downloaded {filename}")
             context.close()
