@@ -1268,16 +1268,29 @@ class CrawlJob:
             time.sleep(0.3)
             self.crawl_page(link, depth + 1)
 
-    def _browser_download_inner(self, page_url, dl_dir):
-        """Inner browser download logic — runs inside a thread with a hard timeout."""
-        context = self._browser.new_context(accept_downloads=True)
-        context.set_extra_http_headers({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                          "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-        })
-        page = context.new_page()
+    def _browser_download(self, page_url):
+        """Use Playwright to navigate to a page and click the Download button.
+
+        Returns (filepath, filename) on success, or (None, None) on failure.
+        Uses aggressive Playwright-native timeouts (30s page load, 60s download).
+        """
+        if not HAS_PLAYWRIGHT:
+            self._log("  Playwright not available for browser download")
+            return None, None
+
+        self._init_browser()
+        import tempfile
+        dl_dir = tempfile.mkdtemp(prefix="crawler_dl_")
 
         try:
+            context = self._browser.new_context(accept_downloads=True)
+            context.set_extra_http_headers({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                              "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+            })
+            page = context.new_page()
+            page.set_default_timeout(30000)
+
             self._log(f"  Browser: navigating to {page_url}")
             page.goto(page_url, timeout=30000, wait_until="domcontentloaded")
             page.wait_for_timeout(2000)
@@ -1304,6 +1317,7 @@ class CrawlJob:
                 context.close()
                 return None, None
 
+            # 60s for download event — if bot protection blocks it, this times out
             self._log("  Browser: clicking download button...")
             with page.expect_download(timeout=60000) as dl_info:
                 download_btn.click()
@@ -1331,39 +1345,8 @@ class CrawlJob:
                 context.close()
             except Exception:
                 pass
-            return None, None
-
-    def _browser_download(self, page_url):
-        """Use Playwright to navigate to a page and click the Download button.
-
-        Returns (filepath, filename) on success, or (None, None) on failure.
-        The entire operation has a hard 90-second timeout to prevent hangs.
-        """
-        if not HAS_PLAYWRIGHT:
-            self._log("  Playwright not available for browser download")
-            return None, None
-
-        self._init_browser()
-        import tempfile
-        import concurrent.futures
-        dl_dir = tempfile.mkdtemp(prefix="crawler_dl_")
-
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-            fut = pool.submit(self._browser_download_inner, page_url, dl_dir)
-            try:
-                return fut.result(timeout=90)
-            except concurrent.futures.TimeoutError:
-                self._log("  Browser: hard timeout (90s) — killing browser")
+            if "closed" in msg.lower() or "crashed" in msg.lower():
                 self._close_browser()
-                return None, None
-            except Exception as e:
-                msg = str(e)
-                if len(msg) > 120:
-                    msg = msg[:120] + "..."
-                self._log(f"  Browser download error: {msg}")
-                if "closed" in msg.lower() or "crashed" in msg.lower():
-                    self._close_browser()
-                return None, None
             return None, None
 
     def _do_download_request(self, url):
