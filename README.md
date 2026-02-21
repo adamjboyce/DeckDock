@@ -136,6 +136,7 @@ Run `device/emu-setup.sh` on your handheld in Desktop Mode. Every feature is opt
 7. **Tailscale** — access your device from anywhere, not just your home network (free for personal use)
 8. **NAS Connection** — connects to your network drive for remote save storage
 9. **SSH Access** — sets up passwordless access so your PC can send files to the device
+10. **BIOS Check** — scans your BIOS folder and tells you exactly which files are present, missing, or wrong
 
 ### After Setup
 
@@ -187,7 +188,7 @@ All settings live in `config.env` (created by `setup.sh` or copied from `config.
 | `DEFAULT_DELAY` | Seconds between downloads | `5` |
 | `DEFAULT_DEPTH` | How deep the crawler follows links | `3` |
 | `BACKUP_KEEP` | How many rolling save backups to keep | `10` |
-| `TRICKLE_PUSH` | Push each file to NAS right after download | `false` |
+| `TRICKLE_PUSH` | Push each file to NAS right after download | `true` |
 
 ---
 
@@ -208,6 +209,7 @@ DeckDock/
 │   ├── emu-setup.sh          # First-time device setup
 │   ├── rom-sorter.sh         # Sorts ROMs into system folders
 │   ├── drop-cleaner.sh       # Cleans processed files from drop folder
+│   ├── bios-check.sh         # Checks which BIOS files you have/need
 │   ├── save-backup.sh        # Backs up emulator save files
 │   ├── sleep-watcher.sh      # Triggers backup on device sleep
 │   ├── rom-sorter.service    # systemd service for ROM sorting

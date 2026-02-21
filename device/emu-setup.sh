@@ -736,6 +736,24 @@ LOCAL_CONFIG="$DECKDOCK_DIR/config.env"
 log "Settings saved to $LOCAL_CONFIG"
 
 # ============================================================================
+# Step 10: BIOS Check
+# ============================================================================
+echo ""
+echo -e "${BOLD}Step 10: BIOS File Check${NC}"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "Some emulators need BIOS files (firmware dumped from real consoles)"
+echo "to work properly. Let's check what you've got."
+echo ""
+
+BIOS_CHECK_SCRIPT="$SCRIPT_DIR/bios-check.sh"
+if [ -f "$BIOS_CHECK_SCRIPT" ]; then
+    bash "$BIOS_CHECK_SCRIPT"
+else
+    warn "BIOS checker not found. You can run it later:"
+    echo "  bash device/bios-check.sh"
+fi
+
+# ============================================================================
 # Done!
 # ============================================================================
 echo ""
