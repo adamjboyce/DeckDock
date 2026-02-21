@@ -76,48 +76,223 @@ else
 fi
 
 # ============================================================================
-# Step 1: EmuDeck
+# Step 1: EmuDeck — Emulator Manager
 # ============================================================================
 echo ""
 echo -e "${BOLD}Step 1: EmuDeck — Emulator Manager${NC}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
+INSTALL_EMUDECK=false
+EMUDECK_ALREADY_INSTALLED=false
+
 if [ -d "$HOME/.config/EmuDeck" ] && [ -f "$HOME/.config/EmuDeck/settings.sh" ]; then
+    EMUDECK_ALREADY_INSTALLED=true
     log "EmuDeck is already installed."
     ask "Do you want to update/reinstall it? [y/N]: "
     read -r REINSTALL_EMUDECK
-    if [[ ! "$REINSTALL_EMUDECK" =~ ^[Yy] ]]; then
-        info "Keeping current EmuDeck installation."
-        INSTALL_EMUDECK=false
-    else
+    if [[ "$REINSTALL_EMUDECK" =~ ^[Yy] ]]; then
         INSTALL_EMUDECK=true
+    else
+        info "Keeping current EmuDeck installation."
     fi
 else
     info "EmuDeck isn't installed yet. This is the tool that sets up all"
-    info "your emulators (RetroArch, DuckStation, PCSX2, Dolphin, etc.)"
-    info "and configures them with good defaults."
+    info "your emulators and configures them with good defaults."
     echo ""
     ask "Install EmuDeck now? [Y/n]: "
     read -r INSTALL_EMUDECK_INPUT
     if [[ "$INSTALL_EMUDECK_INPUT" =~ ^[Nn] ]]; then
-        INSTALL_EMUDECK=false
         warn "Skipping EmuDeck. You can install it later from https://www.emudeck.com"
     else
         INSTALL_EMUDECK=true
     fi
 fi
 
+# --- System Picker: ask what they want to play BEFORE running EmuDeck ---
 if [ "$INSTALL_EMUDECK" = true ]; then
+    echo ""
+    echo -e "${BOLD}Which gaming systems do you want to play?${NC}"
+    echo "We'll set up the right emulators for each one you pick."
+    echo "(Press Enter to accept the default shown in brackets)"
+    echo ""
+
+    # --- Nintendo Consoles ---
+    ask "  Nintendo consoles (NES, SNES, N64, GameCube, Wii)? [Y/n]: "
+    read -r WANT_NINTENDO_CONSOLE
+    EMU_RETROARCH=true  # Always needed — handles NES, SNES, and many others
+    EMU_DOLPHIN=true
+    if [[ "$WANT_NINTENDO_CONSOLE" =~ ^[Nn] ]]; then
+        EMU_DOLPHIN=false
+    fi
+
+    # --- Nintendo Handhelds ---
+    ask "  Nintendo handhelds (Game Boy, GBA, DS, 3DS)? [Y/n]: "
+    read -r WANT_NINTENDO_HANDHELD
+    EMU_MELONDS=true
+    EMU_AZAHAR=true
+    EMU_MGBA=false
+    if [[ "$WANT_NINTENDO_HANDHELD" =~ ^[Nn] ]]; then
+        EMU_MELONDS=false
+        EMU_AZAHAR=false
+    fi
+
+    # --- PlayStation ---
+    ask "  PlayStation (PS1, PS2, PSP)? [Y/n]: "
+    read -r WANT_PLAYSTATION
+    EMU_DUCKSTATION=true
+    EMU_PCSX2=true
+    EMU_PPSSPP=true
+    if [[ "$WANT_PLAYSTATION" =~ ^[Nn] ]]; then
+        EMU_DUCKSTATION=false
+        EMU_PCSX2=false
+        EMU_PPSSPP=false
+    fi
+
+    # --- PS3 (separate because it's resource-heavy) ---
+    ask "  PlayStation 3? (needs a powerful device) [y/N]: "
+    read -r WANT_PS3
+    EMU_RPCS3=false
+    if [[ "$WANT_PS3" =~ ^[Yy] ]]; then
+        EMU_RPCS3=true
+    fi
+
+    # --- Sega ---
+    ask "  Sega (Genesis, Saturn, Dreamcast, Game Gear)? [Y/n]: "
+    read -r WANT_SEGA
+    EMU_FLYCAST=true
+    if [[ "$WANT_SEGA" =~ ^[Nn] ]]; then
+        EMU_FLYCAST=false
+    fi
+
+    # --- Xbox ---
+    ask "  Original Xbox? [y/N]: "
+    read -r WANT_XBOX
+    EMU_XEMU=false
+    if [[ "$WANT_XBOX" =~ ^[Yy] ]]; then
+        EMU_XEMU=true
+    fi
+
+    # --- Nintendo Switch ---
+    ask "  Nintendo Switch? (needs game files + firmware) [y/N]: "
+    read -r WANT_SWITCH
+    EMU_RYUJINX=false
+    if [[ "$WANT_SWITCH" =~ ^[Yy] ]]; then
+        EMU_RYUJINX=true
+    fi
+
+    # --- Wii U ---
+    ask "  Wii U? [y/N]: "
+    read -r WANT_WIIU
+    EMU_CEMU=false
+    if [[ "$WANT_WIIU" =~ ^[Yy] ]]; then
+        EMU_CEMU=true
+    fi
+
+    # --- Arcade ---
+    ask "  Arcade games (MAME)? [y/N]: "
+    read -r WANT_ARCADE
+    EMU_MAME=false
+    if [[ "$WANT_ARCADE" =~ ^[Yy] ]]; then
+        EMU_MAME=true
+    fi
+
+    # --- Classic PC Games ---
+    ask "  Classic PC adventure games (ScummVM)? [y/N]: "
+    read -r WANT_SCUMMVM
+    EMU_SCUMMVM=false
+    if [[ "$WANT_SCUMMVM" =~ ^[Yy] ]]; then
+        EMU_SCUMMVM=true
+    fi
+
+    # --- PS Vita ---
+    ask "  PS Vita? [y/N]: "
+    read -r WANT_VITA
+    EMU_VITA3K=false
+    if [[ "$WANT_VITA" =~ ^[Yy] ]]; then
+        EMU_VITA3K=true
+    fi
+
+    # --- Write EmuDeck settings BEFORE launching the installer ---
+    echo ""
+    info "Pre-configuring EmuDeck with your choices..."
+    EMUDECK_CONFIG_DIR="$HOME/.config/EmuDeck"
+    mkdir -p "$EMUDECK_CONFIG_DIR"
+
+    # If settings.sh exists, update it; otherwise create fresh
+    SETTINGS_FILE="$EMUDECK_CONFIG_DIR/settings.sh"
+
+    # Write emulator toggles — EmuDeck reads these during setup
+    # We only set the emulator enable/disable flags; EmuDeck handles
+    # paths, BIOS, controller config, and everything else.
+    cat > "/tmp/deckdock-emu-prefs.sh" << EMUEOF
+# DeckDock system choices (pre-configured by emu-setup.sh)
+RetroArch=${EMU_RETROARCH}
+dolphin=${EMU_DOLPHIN}
+pcsx2Qt=${EMU_PCSX2}
+rpcs3=${EMU_RPCS3}
+azahar=${EMU_AZAHAR}
+duckstation=${EMU_DUCKSTATION}
+cemu=${EMU_CEMU}
+ryujinx=${EMU_RYUJINX}
+ppsspp=${EMU_PPSSPP}
+xemu=${EMU_XEMU}
+melonds=${EMU_MELONDS}
+mame=${EMU_MAME}
+flycast=${EMU_FLYCAST}
+mgba=${EMU_MGBA}
+scummvm=${EMU_SCUMMVM}
+vita3k=${EMU_VITA3K}
+EMUEOF
+
+    if [ -f "$SETTINGS_FILE" ]; then
+        # Merge our choices into the existing settings file
+        # For each key, replace the line if it exists, or append if it doesn't
+        while IFS='=' read -r key val; do
+            [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
+            if grep -q "^${key}=" "$SETTINGS_FILE" 2>/dev/null; then
+                sed -i "s|^${key}=.*|${key}=${val}|" "$SETTINGS_FILE"
+            else
+                echo "${key}=${val}" >> "$SETTINGS_FILE"
+            fi
+        done < "/tmp/deckdock-emu-prefs.sh"
+        log "Updated existing EmuDeck settings with your choices."
+    else
+        cp "/tmp/deckdock-emu-prefs.sh" "$SETTINGS_FILE"
+        log "Created EmuDeck settings with your choices."
+    fi
+    rm -f "/tmp/deckdock-emu-prefs.sh"
+
+    # Summary of what we're setting up
+    echo ""
+    info "Emulators that will be installed:"
+    [ "$EMU_RETROARCH" = true ]   && echo "    RetroArch  — NES, SNES, Game Boy, Genesis, and more"
+    [ "$EMU_DOLPHIN" = true ]     && echo "    Dolphin    — GameCube and Wii"
+    [ "$EMU_DUCKSTATION" = true ] && echo "    DuckStation — PlayStation 1"
+    [ "$EMU_PCSX2" = true ]       && echo "    PCSX2      — PlayStation 2"
+    [ "$EMU_RPCS3" = true ]       && echo "    RPCS3      — PlayStation 3"
+    [ "$EMU_PPSSPP" = true ]      && echo "    PPSSPP     — PSP"
+    [ "$EMU_VITA3K" = true ]      && echo "    Vita3K     — PS Vita"
+    [ "$EMU_AZAHAR" = true ]      && echo "    Azahar     — Nintendo 3DS"
+    [ "$EMU_MELONDS" = true ]     && echo "    melonDS    — Nintendo DS"
+    [ "$EMU_FLYCAST" = true ]     && echo "    Flycast    — Dreamcast"
+    [ "$EMU_XEMU" = true ]        && echo "    xemu       — Original Xbox"
+    [ "$EMU_RYUJINX" = true ]     && echo "    Ryujinx    — Nintendo Switch"
+    [ "$EMU_CEMU" = true ]        && echo "    Cemu       — Wii U"
+    [ "$EMU_MAME" = true ]        && echo "    MAME       — Arcade"
+    [ "$EMU_SCUMMVM" = true ]     && echo "    ScummVM    — Classic PC adventures"
+    echo ""
+
+    # Now download and launch EmuDeck
     info "Downloading EmuDeck installer..."
     EMUDECK_INSTALLER="/tmp/EmuDeck.desktop"
     curl -sL "https://www.emudeck.com/EmuDeck.desktop" -o "$EMUDECK_INSTALLER" 2>/dev/null
 
     if [ -f "$EMUDECK_INSTALLER" ]; then
         log "EmuDeck installer downloaded."
-        info "Launching EmuDeck setup — follow the on-screen prompts."
+        info "Launching EmuDeck setup — it will pick up your system choices."
+        info "Follow any remaining on-screen prompts (storage location, etc.)"
         info "When it's done, come back here and press Enter to continue."
         echo ""
-        # Try to launch it
         chmod +x "$EMUDECK_INSTALLER"
         bash -c "$(grep '^Exec=' "$EMUDECK_INSTALLER" | sed 's/^Exec=//')" &
         EMUDECK_PID=$!
@@ -129,6 +304,7 @@ if [ "$INSTALL_EMUDECK" = true ]; then
     else
         fail "Couldn't download EmuDeck. Check your internet connection."
         warn "You can install it manually from https://www.emudeck.com"
+        warn "Your emulator choices have been saved and will be picked up when you run EmuDeck."
     fi
 fi
 
