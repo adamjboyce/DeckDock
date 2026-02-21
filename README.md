@@ -17,6 +17,9 @@ DeckDock is a set of tools that automates the tedious parts of setting up a retr
 | **Trickle Push** | Don't have much local storage? Each file pushes to your NAS right after it downloads. |
 | **Save Backups** | Every time you put your device to sleep, your save files get backed up. Never lose progress. |
 | **EmuDeck Setup** | One script gets your device set up with emulators, folders, and services. |
+| **Xbox Cloud Gaming** | Stream Xbox games on your handheld over Wi-Fi. No downloads needed. |
+| **Steam ROM Manager** | Adds all your retro games to Steam with artwork — browse them in Gaming Mode. |
+| **Tailscale** | Access your device from anywhere. Push games, stream, or SSH — even away from home. |
 
 ---
 
@@ -122,21 +125,25 @@ It handles: `.zip`, `.7z`, `.rar`, `.iso`, `.bin/.cue`, `.chd`, `.rvz`, `.cso`, 
 
 ## Device Setup
 
-Run `device/emu-setup.sh` on your handheld in Desktop Mode. It does:
+Run `device/emu-setup.sh` on your handheld in Desktop Mode. Every feature is optional — you choose what to enable:
 
-1. **Installs EmuDeck** — the tool that sets up RetroArch, DuckStation, PCSX2, Dolphin, and other emulators with good defaults
-2. **Creates folders** — `~/Emulation/roms/<system>/` for every supported system, plus `drop/`, `saves/`, and `backups/`
-3. **ROM Sorter** — a background service that watches your `drop/` folder and automatically moves files to the right system folder
+1. **EmuDeck** — installs RetroArch, DuckStation, PCSX2, Dolphin, and other emulators with good defaults
+2. **Folder structure** — creates `~/Emulation/roms/<system>/` for every supported system, plus `drop/`, `saves/`, and `backups/`
+3. **ROM Sorter** — background service that watches your `drop/` folder and auto-sorts files into the right system folder
 4. **Save Backup** — backs up your game saves every time you put the device to sleep (no more lost progress)
-5. **NAS Connection** — optionally connects to your network drive for remote save storage
-6. **SSH Access** — sets up passwordless access so your PC can send files to the device
+5. **Xbox Cloud Gaming** — sets up a browser shortcut to stream Xbox games (requires Game Pass Ultimate)
+6. **Steam ROM Manager** — scans your ROM folders and adds every game to your Steam library with artwork (auto-add or manual preview)
+7. **Tailscale** — access your device from anywhere, not just your home network (free for personal use)
+8. **NAS Connection** — connects to your network drive for remote save storage
+9. **SSH Access** — sets up passwordless access so your PC can send files to the device
 
 ### After Setup
 
 - **Drop games** into `~/Emulation/drop/` — they sort themselves
 - **Play games** — they're in `~/Emulation/roms/<system>/`
 - **Sleep your device** — saves back up automatically
-- **Run Steam ROM Manager** to add your sorted games to Steam's library
+- **Xbox Cloud** — open from your app menu or Steam to stream Xbox games
+- **Remote access** — SSH or push games from anywhere via Tailscale
 
 ---
 

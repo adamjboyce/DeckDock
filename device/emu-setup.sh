@@ -232,10 +232,246 @@ else
 fi
 
 # ============================================================================
-# Step 4: NAS Connection (Optional)
+# Step 4: Xbox Cloud Gaming (Optional)
 # ============================================================================
 echo ""
-echo -e "${BOLD}Step 4: Network Storage (Optional)${NC}"
+echo -e "${BOLD}Step 4: Xbox Cloud Gaming (Optional)${NC}"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "Play Xbox games on your handheld by streaming them from the cloud."
+echo "This works over Wi-Fi — no downloads needed. You'll need an Xbox"
+echo "Game Pass Ultimate subscription to use it."
+echo ""
+
+SETUP_XBOX=false
+ask "Set up Xbox Cloud Gaming? [y/N]: "
+read -r XBOX_INPUT
+if [[ "$XBOX_INPUT" =~ ^[Yy] ]]; then
+    SETUP_XBOX=true
+
+    # Find a Chromium-based browser (Chrome, Edge, or Chromium)
+    XBOX_BROWSER=""
+    XBOX_BROWSER_NAME=""
+
+    if flatpak list 2>/dev/null | grep -q "com.microsoft.Edge"; then
+        XBOX_BROWSER="com.microsoft.Edge"
+        XBOX_BROWSER_NAME="Microsoft Edge"
+    elif flatpak list 2>/dev/null | grep -q "com.google.Chrome"; then
+        XBOX_BROWSER="com.google.Chrome"
+        XBOX_BROWSER_NAME="Google Chrome"
+    elif flatpak list 2>/dev/null | grep -q "org.chromium.Chromium"; then
+        XBOX_BROWSER="org.chromium.Chromium"
+        XBOX_BROWSER_NAME="Chromium"
+    fi
+
+    if [ -z "$XBOX_BROWSER" ]; then
+        info "No compatible browser found. Installing Google Chrome..."
+        if flatpak install -y --user flathub com.google.Chrome 2>/dev/null; then
+            XBOX_BROWSER="com.google.Chrome"
+            XBOX_BROWSER_NAME="Google Chrome"
+            log "Google Chrome installed."
+        else
+            fail "Couldn't install Chrome. You may need to add the Flathub repo first:"
+            echo "  flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo"
+            SETUP_XBOX=false
+        fi
+    else
+        log "Found $XBOX_BROWSER_NAME — will use that."
+    fi
+
+    if [ "$SETUP_XBOX" = true ]; then
+        # Create a .desktop launcher for Xbox Cloud Gaming
+        XBOX_DESKTOP="$HOME/.local/share/applications/xbox-cloud-gaming.desktop"
+        mkdir -p "$(dirname "$XBOX_DESKTOP")"
+        cat > "$XBOX_DESKTOP" << XBOXEOF
+[Desktop Entry]
+Name=Xbox Cloud Gaming
+Comment=Stream Xbox games from the cloud
+Exec=flatpak run $XBOX_BROWSER --kiosk --start-fullscreen --app=https://www.xbox.com/play
+Type=Application
+Categories=Game;
+Icon=applications-games
+Terminal=false
+XBOXEOF
+        log "Xbox Cloud Gaming shortcut created."
+
+        # Also add as a Steam shortcut if possible
+        info "You can add Xbox Cloud Gaming to Steam in two ways:"
+        echo "    1. In Steam Desktop mode: Games → Add a Non-Steam Game → Xbox Cloud Gaming"
+        echo "    2. Through Steam ROM Manager (we'll set that up next)"
+        echo ""
+        echo "  Tip: In Gaming Mode, use the on-screen controls or pair an Xbox controller"
+        echo "  over Bluetooth for the best experience."
+    fi
+fi
+
+# ============================================================================
+# Step 5: Steam ROM Manager — Add Games to Steam
+# ============================================================================
+echo ""
+echo -e "${BOLD}Step 5: Steam ROM Manager — Add Games to Steam${NC}"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "Steam ROM Manager scans your game folders and adds every game to your"
+echo "Steam library automatically — with artwork, icons, and categories."
+echo "After this, all your retro games show up in Gaming Mode."
+echo ""
+
+# Find SRM — could be AppImage (EmuDeck installs this) or Flatpak
+SRM_CMD=""
+SRM_NAME=""
+
+if [ -f "$HOME/Emulation/tools/Steam-ROM-Manager.AppImage" ]; then
+    SRM_CMD="$HOME/Emulation/tools/Steam-ROM-Manager.AppImage"
+    SRM_NAME="AppImage"
+elif [ -f "$EMU_BASE/tools/Steam-ROM-Manager.AppImage" ]; then
+    SRM_CMD="$EMU_BASE/tools/Steam-ROM-Manager.AppImage"
+    SRM_NAME="AppImage"
+elif flatpak list 2>/dev/null | grep -q "com.steamgriddb.steam-rom-manager"; then
+    SRM_CMD="flatpak run com.steamgriddb.steam-rom-manager"
+    SRM_NAME="Flatpak"
+fi
+
+if [ -n "$SRM_CMD" ]; then
+    log "Steam ROM Manager found ($SRM_NAME)."
+    echo ""
+    echo "  You have two options:"
+    echo ""
+    echo "    1. Auto-add — Scans your ROM folders and adds everything to Steam right now."
+    echo "       (Steam must be closed for this to work.)"
+    echo ""
+    echo "    2. Open the app — Launch Steam ROM Manager so you can preview and customize"
+    echo "       which games get added and how they look."
+    echo ""
+    ask "What would you like to do? [1=Auto-add / 2=Open app / N=Skip]: "
+    read -r SRM_CHOICE
+
+    if [[ "$SRM_CHOICE" == "1" ]]; then
+        # Check if Steam is running
+        if pgrep -x steam > /dev/null 2>&1; then
+            warn "Steam is currently running. Please close it first."
+            ask "Press Enter once Steam is closed (or type 'skip' to skip)... "
+            read -r STEAM_CLOSED
+            if [[ "$STEAM_CLOSED" == "skip" ]]; then
+                warn "Skipping Steam ROM Manager. You can run it later from Desktop Mode."
+                SRM_CHOICE="skip"
+            fi
+        fi
+
+        if [[ "$SRM_CHOICE" == "1" ]]; then
+            info "Adding all games to Steam (this may take a minute)..."
+            if echo "$SRM_CMD" | grep -q "flatpak"; then
+                flatpak run com.steamgriddb.steam-rom-manager add 2>/dev/null && \
+                    log "Games added to Steam! They'll appear when you restart Steam." || \
+                    warn "Auto-add didn't work. Try opening the app instead (option 2)."
+            else
+                "$SRM_CMD" add 2>/dev/null && \
+                    log "Games added to Steam! They'll appear when you restart Steam." || \
+                    warn "Auto-add didn't work. Try opening the app instead (option 2)."
+            fi
+        fi
+    elif [[ "$SRM_CHOICE" == "2" ]]; then
+        info "Opening Steam ROM Manager..."
+        if echo "$SRM_CMD" | grep -q "flatpak"; then
+            flatpak run com.steamgriddb.steam-rom-manager &
+        else
+            "$SRM_CMD" &
+        fi
+        SRM_PID=$!
+        echo ""
+        echo "  In Steam ROM Manager:"
+        echo "    1. Click 'Preview' to see what games will be added"
+        echo "    2. Click 'Save to Steam' to add them"
+        echo "    3. Close the app when you're done"
+        echo ""
+        ask "Press Enter when you're done with Steam ROM Manager..."
+        read -r
+        wait "$SRM_PID" 2>/dev/null || true
+        log "Steam ROM Manager done."
+    else
+        info "Skipping for now. You can run Steam ROM Manager anytime from Desktop Mode."
+    fi
+else
+    warn "Steam ROM Manager isn't installed yet."
+    info "EmuDeck usually installs it. If you installed EmuDeck in Step 1,"
+    info "try running this setup again after EmuDeck finishes."
+    echo ""
+    info "Or install it manually:"
+    echo "  flatpak install --user flathub com.steamgriddb.steam-rom-manager"
+fi
+
+# ============================================================================
+# Step 6: Tailscale — Access From Anywhere (Optional)
+# ============================================================================
+echo ""
+echo -e "${BOLD}Step 6: Tailscale — Access From Anywhere (Optional)${NC}"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "Tailscale lets you access your device from anywhere — not just your"
+echo "home Wi-Fi. Stream games remotely, push ROMs from your phone, or SSH"
+echo "in from work. It's free for personal use."
+echo ""
+
+SETUP_TAILSCALE=false
+ask "Set up Tailscale for remote access? [y/N]: "
+read -r TS_INPUT
+if [[ "$TS_INPUT" =~ ^[Yy] ]]; then
+    SETUP_TAILSCALE=true
+
+    # Check if Tailscale is already installed
+    if command -v tailscale &>/dev/null; then
+        log "Tailscale is already installed."
+
+        if tailscale status &>/dev/null; then
+            TS_IP=$(tailscale ip -4 2>/dev/null || echo "unknown")
+            log "Tailscale is connected. Your device's Tailscale IP: $TS_IP"
+        else
+            info "Tailscale is installed but not connected. Logging in..."
+            echo ""
+            echo "  A browser window will open. Sign in with your Tailscale account"
+            echo "  (Google, Microsoft, GitHub, etc.) to connect this device."
+            echo ""
+            sudo -n tailscale up 2>/dev/null || tailscale up 2>/dev/null || \
+                warn "Couldn't start Tailscale automatically. Run: sudo tailscale up"
+        fi
+    else
+        info "Installing Tailscale..."
+        if curl -fsSL https://tailscale.com/install.sh | sh 2>/dev/null; then
+            log "Tailscale installed."
+            info "Starting Tailscale — a browser window will open for you to sign in."
+            echo ""
+            echo "  Sign in with your Tailscale account (Google, Microsoft, GitHub, etc.)"
+            echo "  to connect this device to your personal network."
+            echo ""
+            sudo -n systemctl enable --now tailscaled 2>/dev/null || true
+            sudo -n tailscale up 2>/dev/null || tailscale up 2>/dev/null || \
+                warn "Couldn't start Tailscale. Run: sudo tailscale up"
+
+            if tailscale status &>/dev/null; then
+                TS_IP=$(tailscale ip -4 2>/dev/null || echo "unknown")
+                log "Tailscale connected! Your device's Tailscale IP: $TS_IP"
+                echo ""
+                echo "  You can now reach this device from anywhere using: $TS_IP"
+                echo "  Install Tailscale on your other devices at: https://tailscale.com/download"
+            fi
+        else
+            fail "Couldn't install Tailscale. You can install it manually from:"
+            echo "  https://tailscale.com/download"
+        fi
+    fi
+
+    if [ "$SETUP_TAILSCALE" = true ]; then
+        echo ""
+        echo "  What Tailscale gives you:"
+        echo "    - SSH into your handheld from anywhere (not just home Wi-Fi)"
+        echo "    - Push games from your PC when you're away from home"
+        echo "    - Use Steam Remote Play over Tailscale for on-the-go streaming"
+        echo "    - Access your NAS from anywhere too (if Tailscale is on your NAS)"
+    fi
+fi
+
+# ============================================================================
+# Step 7: NAS Connection (Optional)
+# ============================================================================
+echo ""
+echo -e "${BOLD}Step 7: Network Storage (Optional)${NC}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "If you have a NAS (network storage device), DeckDock can automatically"
 echo "back up your saves there too. This keeps your saves safe even if"
@@ -267,10 +503,10 @@ if [ -n "$NAS_HOST" ]; then
 fi
 
 # ============================================================================
-# Step 5: SSH Key Setup
+# Step 8: SSH Key Setup
 # ============================================================================
 echo ""
-echo -e "${BOLD}Step 5: Remote Access${NC}"
+echo -e "${BOLD}Step 8: Remote Access (SSH)${NC}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "DeckDock works best when your PC can send files to this device"
 echo "without needing a password every time. This uses SSH keys."
@@ -302,28 +538,26 @@ else
 fi
 
 # ============================================================================
-# Step 6: Write local config
+# Step 9: Save Settings
 # ============================================================================
 echo ""
-echo -e "${BOLD}Step 6: Saving Settings${NC}"
+echo -e "${BOLD}Step 9: Saving Settings${NC}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 LOCAL_CONFIG="$DECKDOCK_DIR/config.env"
 
-# Only write NAS settings if provided
-if [ -n "$NAS_HOST" ]; then
-    cat > "$LOCAL_CONFIG" << EOF
-# DeckDock Device Config (auto-generated by emu-setup.sh)
-NAS_HOST=$NAS_HOST
-NAS_EXPORT=$NAS_EXPORT
-NAS_MOUNT=$NAS_MOUNT
-NAS_SAVE_SUBDIR=$NAS_SAVE_SUBDIR
-BACKUP_KEEP=$BACKUP_KEEP
-EOF
-    log "Settings saved to $LOCAL_CONFIG"
-else
-    log "No NAS configured — local-only mode."
-fi
+# Write all configured settings
+{
+    echo "# DeckDock Device Config (auto-generated by emu-setup.sh)"
+    echo "BACKUP_KEEP=$BACKUP_KEEP"
+    if [ -n "$NAS_HOST" ]; then
+        echo "NAS_HOST=$NAS_HOST"
+        echo "NAS_EXPORT=$NAS_EXPORT"
+        echo "NAS_MOUNT=$NAS_MOUNT"
+        echo "NAS_SAVE_SUBDIR=$NAS_SAVE_SUBDIR"
+    fi
+} > "$LOCAL_CONFIG"
+log "Settings saved to $LOCAL_CONFIG"
 
 # ============================================================================
 # Done!
@@ -344,14 +578,29 @@ echo ""
 echo "  Save backups   Every time you put this device to sleep,"
 echo "                 your game saves are backed up automatically."
 echo ""
+if [ "$SETUP_XBOX" = true ]; then
+echo "  Xbox Cloud     Open 'Xbox Cloud Gaming' from your app menu or Steam"
+echo "                 to stream Xbox games. Requires Game Pass Ultimate."
+echo ""
+fi
 if [ -n "$NAS_HOST" ]; then
 echo "  NAS backups    Saves also get pushed to your NAS at $NAS_HOST"
 echo "                 when you're on your home network."
 echo ""
 fi
+if [ "$SETUP_TAILSCALE" = true ]; then
+TS_IP=$(tailscale ip -4 2>/dev/null || echo "your-tailscale-ip")
+echo "  Tailscale      Access this device from anywhere at $TS_IP"
+echo "                 Install Tailscale on your other devices too."
+echo ""
+fi
 echo "  Next steps:"
 echo "    1. Drop some ROMs into $EMU_BASE/drop/ to test sorting"
+if [ -z "$SRM_CMD" ] || [[ ! "$SRM_CHOICE" =~ ^[12]$ ]]; then
 echo "    2. Open Steam ROM Manager to add sorted games to Steam"
+else
+echo "    2. Restart Steam to see your newly added games"
+fi
 echo "    3. From your PC, run the DeckDock crawler to download games"
 echo "       and push them to this device automatically"
 echo ""
