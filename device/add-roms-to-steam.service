@@ -1,0 +1,11 @@
+[Unit]
+Description=Add ROMs to Steam library as non-Steam shortcuts
+Before=steam.service
+After=graphical-session.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/Emulation/tools/add-roms-to-steam.py
+
+[Install]
+WantedBy=default.target

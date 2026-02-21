@@ -1016,8 +1016,21 @@ class CrawlJob:
         return self.output_dir / system / filename
 
     def _init_browser(self):
-        """Lazy-init Playwright browser for JS rendering."""
-        if self._pw is None and self.js_mode:
+        """Lazy-init Playwright browser for JS rendering.
+        Also recovers if the browser process died unexpectedly."""
+        if not self.js_mode:
+            return
+        # Check if existing browser is still alive
+        if self._browser is not None:
+            try:
+                self._browser.contexts  # probe — throws if dead
+                return  # browser is alive, nothing to do
+            except Exception:
+                self._log("  Browser process died, reinitializing...")
+                self._pw = None
+                self._browser = None
+                self._page = None
+        if self._pw is None:
             self._pw = sync_playwright().start()
             self._browser = self._pw.chromium.launch(headless=True)
             self._page = self._browser.new_page()
@@ -1027,11 +1040,17 @@ class CrawlJob:
             })
 
     def _close_browser(self):
-        """Clean up Playwright."""
-        if self._browser:
-            self._browser.close()
-        if self._pw:
-            self._pw.stop()
+        """Clean up Playwright. Safe to call even if browser is already dead."""
+        try:
+            if self._browser:
+                self._browser.close()
+        except Exception:
+            pass
+        try:
+            if self._pw:
+                self._pw.stop()
+        except Exception:
+            pass
         self._pw = None
         self._browser = None
         self._page = None
@@ -1298,7 +1317,7 @@ class CrawlJob:
                 context.close()
                 return None, None
 
-            # Click and wait for the download to start
+            # Click and wait for the download to start (2 min to begin, 5 min to finish)
             self._log("  Browser: clicking download button...")
             with page.expect_download(timeout=120000) as dl_info:
                 download_btn.click()
@@ -1306,6 +1325,12 @@ class CrawlJob:
             download = dl_info.value
             filename = download.suggested_filename
             save_path = os.path.join(dl_dir, filename)
+            # Fail path returns non-None on error (e.g. stalled download)
+            fail = download.failure()
+            if fail:
+                self._log(f"  Browser: download failed — {fail}")
+                context.close()
+                return None, None
             download.save_as(save_path)
 
             self._log(f"  Browser: downloaded {filename}")
@@ -1321,6 +1346,9 @@ class CrawlJob:
                 context.close()
             except Exception:
                 pass
+            # If browser itself died, reset so _init_browser re-creates it
+            if "closed" in msg.lower() or "crashed" in msg.lower():
+                self._close_browser()
             return None, None
 
     def _do_download_request(self, url):

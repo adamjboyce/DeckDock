@@ -18,7 +18,7 @@ DeckDock is a set of tools that automates the tedious parts of setting up a retr
 | **Save Backups** | Every time you put your device to sleep, your save files get backed up. Never lose progress. |
 | **EmuDeck Setup** | One script gets your device set up with emulators, folders, and services. |
 | **Xbox Cloud Gaming** | Stream Xbox games on your handheld over Wi-Fi. No downloads needed. |
-| **Steam ROM Manager** | Adds all your retro games to Steam with artwork — browse them in Gaming Mode. |
+| **Steam Integration** | Adds all your retro games to Steam with box art — browse and launch from Gaming Mode. |
 | **Tailscale** | Access your device from anywhere. Push games, stream, or SSH — even away from home. |
 
 ---
@@ -132,7 +132,7 @@ Run `device/emu-setup.sh` on your handheld in Desktop Mode. Every feature is opt
 3. **ROM Sorter** — background service that watches your `drop/` folder and auto-sorts files into the right system folder
 4. **Save Backup** — backs up your game saves every time you put the device to sleep (no more lost progress)
 5. **Xbox Cloud Gaming** — sets up a browser shortcut to stream Xbox games (requires Game Pass Ultimate)
-6. **Steam ROM Manager** — scans your ROM folders and adds every game to your Steam library with artwork (auto-add or manual preview)
+6. **Steam Integration** — adds every ROM to your Steam library with box art so you can browse and launch from Gaming Mode (runs automatically on boot)
 7. **Tailscale** — access your device from anywhere, not just your home network (free for personal use)
 8. **NAS Connection** — connects to your network drive for remote save storage
 9. **SSH Access** — sets up passwordless access so your PC can send files to the device
@@ -210,6 +210,9 @@ DeckDock/
 │   ├── rom-sorter.sh         # Sorts ROMs into system folders
 │   ├── drop-cleaner.sh       # Cleans processed files from drop folder
 │   ├── bios-check.sh         # Checks which BIOS files you have/need
+│   ├── add-roms-to-steam.py  # Adds ROMs to Steam as non-Steam shortcuts
+│   ├── fetch-boxart.py       # Downloads box art for Steam and ES-DE
+│   ├── add-roms-to-steam.service  # Auto-add on boot (systemd)
 │   ├── save-backup.sh        # Backs up emulator save files
 │   ├── sleep-watcher.sh      # Triggers backup on device sleep
 │   ├── rom-sorter.service    # systemd service for ROM sorting
