@@ -888,7 +888,7 @@ class CrawlJob:
             result = subprocess.run(
                 ["ssh", DEVICE_HOST,
                  f"mkdir -p {NAS_MOUNT} && sudo mount -t nfs "
-                 f"{NAS_HOST}:{NAS_EXPORT} {NAS_MOUNT} -o nolock,soft,timeo=10"],
+                 f"{NAS_HOST}:{NAS_EXPORT} {NAS_MOUNT} -o hard,intr,nolock,timeo=600"],
                 capture_output=True, text=True, timeout=30,
             )
             if result.returncode == 0:
@@ -1903,7 +1903,7 @@ class GUIHandler(http.server.BaseHTTPRequestHandler):
             rc = subprocess.run(
                 ["ssh", DEVICE_HOST,
                  f"mkdir -p {NAS_MOUNT} && sudo mount -t nfs "
-                 f"{NAS_HOST}:{NAS_EXPORT} {NAS_MOUNT} -o nolock,soft,timeo=10"],
+                 f"{NAS_HOST}:{NAS_EXPORT} {NAS_MOUNT} -o hard,intr,nolock,timeo=600"],
                 capture_output=True, timeout=30
             ).returncode
             if rc != 0:

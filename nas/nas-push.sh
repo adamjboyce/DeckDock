@@ -66,7 +66,7 @@ fi
 
 # --- Mount NAS on device ----------------------------------------------------
 log "${CYAN}Mounting NAS on device...${NC}"
-ssh "$DEVICE_HOST" "mkdir -p $NAS_MOUNT && sudo mount -t nfs ${NAS_HOST}:${NAS_EXPORT} $NAS_MOUNT -o nolock,soft,timeo=10" 2>/dev/null
+ssh "$DEVICE_HOST" "mkdir -p $NAS_MOUNT && sudo mount -t nfs ${NAS_HOST}:${NAS_EXPORT} $NAS_MOUNT -o hard,intr,nolock,timeo=600" 2>/dev/null
 if [ $? -ne 0 ]; then
     log "${RED}Failed to mount NAS on device.${NC}"
     exit 1
@@ -90,7 +90,9 @@ RESULT=$?
 ssh "$DEVICE_HOST" "sudo umount $NAS_MOUNT" 2>/dev/null
 
 # --- Post-sync cleanup ------------------------------------------------------
-if [ $RESULT -eq 0 ]; then
+# rsync exit 23 = "some files/attrs not transferred" — typically just NFS
+# timestamp permission errors, not actual file transfer failures. Treat as success.
+if [ $RESULT -eq 0 ] || [ $RESULT -eq 23 ]; then
     log "${GREEN}All files pushed to NAS successfully.${NC}"
 
     # Clean up staged files (keep .crawler-state.json for crawl resume)

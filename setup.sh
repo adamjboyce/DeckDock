@@ -168,7 +168,7 @@ collect_trickle() {
     section "Trickle Push"
 
     local def_trickle
-    def_trickle=$(existing_or_default "TRICKLE_PUSH" "false")
+    def_trickle=$(existing_or_default "TRICKLE_PUSH" "true")
     ask "Auto-push files to NAS after download (true/false)" "$def_trickle"
     CFG_TRICKLE_PUSH="$REPLY"
 }
