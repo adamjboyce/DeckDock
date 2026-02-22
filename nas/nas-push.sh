@@ -1,9 +1,9 @@
 #!/bin/bash
 # ============================================================================
-# NAS PUSH — Syncs staged files from the PC to NAS via the device
+# NAS PUSH — Syncs staged files from the PC directly to NAS via SSH/SCP
 #
-# The device (Steam Deck / Legion Go) has NFS mount access to the NAS;
-# the PC typically does not. So we relay files through the device's mount.
+# Pushes files directly to the NAS over SSH — no device intermediary needed.
+# Files are chmod'd a+r after push so SSHFS on the device can read them.
 #
 # Configuration is read from config.env. Search order:
 #   1. $DECKDOCK_CONFIG               (explicit override)
@@ -27,11 +27,11 @@ source "$CONFIG_FILE"
 
 # --- Resolve variables (allow CLI override for staging dir) ----------------
 STAGING_DIR="${1:-${STAGING_DIR:-$HOME/nas-staging}}"
-DEVICE_HOST="${DEVICE_HOST:?DEVICE_HOST must be set in config.env}"
 NAS_HOST="${NAS_HOST:?NAS_HOST must be set in config.env}"
+NAS_USER="${NAS_USER:-root}"
 NAS_EXPORT="${NAS_EXPORT:?NAS_EXPORT must be set in config.env}"
-NAS_MOUNT="${NAS_MOUNT:-/tmp/nas-roms}"
 NAS_ROM_SUBDIR="${NAS_ROM_SUBDIR:-roms}"
+SSH_KEY="$HOME/.ssh/id_ed25519"
 
 # --- Colours ---------------------------------------------------------------
 GREEN='\033[0;32m'
@@ -41,6 +41,9 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 log() { echo -e "[$(date '+%H:%M:%S')] $1"; }
+
+SSH_TARGET="${NAS_USER}@${NAS_HOST}"
+_ssh() { ssh -n -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 "$SSH_TARGET" "$@"; }
 
 # --- Preflight checks ------------------------------------------------------
 if [ ! -d "$STAGING_DIR" ]; then
@@ -58,53 +61,60 @@ fi
 
 log "${CYAN}Found $FILE_COUNT files to push to NAS${NC}"
 
-# Check device is reachable
-if ! ssh -o ConnectTimeout=3 -o BatchMode=yes "$DEVICE_HOST" "echo ok" &>/dev/null; then
-    log "${RED}Can't reach device ($DEVICE_HOST). Is it on?${NC}"
-    exit 1
-fi
-
-# --- Mount NAS on device ----------------------------------------------------
-log "${CYAN}Mounting NAS on device...${NC}"
-ssh "$DEVICE_HOST" "mkdir -p $NAS_MOUNT && sudo mount -t nfs ${NAS_HOST}:${NAS_EXPORT} $NAS_MOUNT -o hard,intr,nolock,timeo=600" 2>/dev/null
-if [ $? -ne 0 ]; then
-    log "${RED}Failed to mount NAS on device.${NC}"
+# Check NAS is reachable
+if ! _ssh "echo ok" &>/dev/null; then
+    log "${RED}Can't reach NAS ($NAS_HOST). Is it on?${NC}"
     exit 1
 fi
 
 # Ensure ROM subdirectory exists on NAS
-ssh "$DEVICE_HOST" "mkdir -p $NAS_MOUNT/$NAS_ROM_SUBDIR"
+_ssh "mkdir -p \"${NAS_EXPORT}/${NAS_ROM_SUBDIR}\""
 
-# --- Sync files via rsync through the device --------------------------------
-log "${CYAN}Syncing files to NAS...${NC}"
-rsync -avz --progress --no-group -m \
-    --exclude=".crawler-state.json" \
-    --exclude="*.part" \
-    --ignore-existing \
-    "$STAGING_DIR/" \
-    "$DEVICE_HOST:$NAS_MOUNT/$NAS_ROM_SUBDIR/"
+# --- Push files directly to NAS via SCP ------------------------------------
+log "${CYAN}Pushing files to NAS...${NC}"
+PUSHED=0
+ERRORS=0
 
-RESULT=$?
+while IFS= read -r -d '' file; do
+    rel_path="${file#$STAGING_DIR/}"
+    target_dir="${NAS_EXPORT}/${NAS_ROM_SUBDIR}/$(dirname "$rel_path")"
+    filename="$(basename "$file")"
 
-# --- Unmount NAS ------------------------------------------------------------
-ssh "$DEVICE_HOST" "sudo umount $NAS_MOUNT" 2>/dev/null
+    # Ensure target dir exists
+    _ssh "mkdir -p \"${target_dir}\"" 2>/dev/null
 
-# --- Post-sync cleanup ------------------------------------------------------
-# rsync exit 23 = "some files/attrs not transferred" — typically just NFS
-# timestamp permission errors, not actual file transfer failures. Treat as success.
-if [ $RESULT -eq 0 ] || [ $RESULT -eq 23 ]; then
-    log "${GREEN}All files pushed to NAS successfully.${NC}"
+    # Check if file already exists on NAS
+    if _ssh "test -f \"${target_dir}/${filename}\"" 2>/dev/null; then
+        log "  ${YELLOW}Skipping (exists): ${rel_path}${NC}"
+        rm -f "$file"
+        PUSHED=$((PUSHED + 1))
+        continue
+    fi
 
-    # Clean up staged files (keep .crawler-state.json for crawl resume)
-    CLEANED=0
-    while IFS= read -r -d '' file; do
-        rm -f "$file" && CLEANED=$((CLEANED + 1))
-    done < <(find "$STAGING_DIR" -type f ! -name ".crawler-state.json" ! -name "*.part" -print0)
+    # SCP the file directly to NAS (modern SCP uses SFTP protocol internally,
+    # so remote paths are used as-is — no shell escaping needed)
+    scp -i "$SSH_KEY" \
+        -o StrictHostKeyChecking=accept-new \
+        -o ConnectTimeout=10 \
+        "$file" "${SSH_TARGET}:${target_dir}/${filename}" >/dev/null 2>&1
 
-    # Remove empty directories (but not the staging root)
-    find "$STAGING_DIR" -mindepth 1 -type d -empty -delete 2>/dev/null
+    if [ $? -eq 0 ]; then
+        # Set permissions so SSHFS on device can read
+        _ssh "chmod a+r \"${target_dir}/${filename}\"" 2>/dev/null
+        rm -f "$file"
+        PUSHED=$((PUSHED + 1))
+        log "  ${GREEN}Pushed: ${rel_path}${NC}"
+    else
+        ERRORS=$((ERRORS + 1))
+        log "  ${RED}Failed: ${rel_path}${NC}"
+    fi
+done < <(find "$STAGING_DIR" -type f ! -name ".crawler-state.json" ! -name "*.part" -print0)
 
-    log "${GREEN}Cleaned up $CLEANED staged files. Staging dir ready for next crawl.${NC}"
+# Remove empty directories (but not the staging root)
+find "$STAGING_DIR" -mindepth 1 -type d -empty -delete 2>/dev/null
+
+if [ "$ERRORS" -eq 0 ]; then
+    log "${GREEN}All done: $PUSHED files pushed to NAS.${NC}"
 else
-    log "${RED}Sync had errors. Staged files kept for retry.${NC}"
+    log "${YELLOW}Done: $PUSHED pushed, $ERRORS failed. Failed files kept for retry.${NC}"
 fi

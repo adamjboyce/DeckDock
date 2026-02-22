@@ -166,6 +166,7 @@ DEFAULT_DEPTH = int(cfg("DEFAULT_DEPTH", "3"))
 # Network targets from config
 DEVICE_HOST = cfg("DEVICE_HOST", "")
 NAS_HOST = cfg("NAS_HOST", "")
+NAS_USER = cfg("NAS_USER", "root")
 NAS_EXPORT = cfg("NAS_EXPORT", "")
 NAS_MOUNT = cfg("NAS_MOUNT", "/tmp/nas-roms")
 NAS_ROM_SUBDIR = cfg("NAS_ROM_SUBDIR", "roms")
@@ -333,9 +334,8 @@ class CrawlJob:
 
         # Trickle push state
         self._trickle_enabled = TRICKLE_PUSH
-        self._device_reachable = None  # None = unknown, True/False = cached result
-        self._device_check_time = 0    # timestamp of last reachability check
-        self._nas_mounted = False      # whether we've mounted the NAS this run
+        self._nas_reachable = None     # None = unknown, True/False = cached result
+        self._nas_check_time = 0       # timestamp of last reachability check
 
         # State
         self.state_file = self.output_dir / ".crawler-state.json"
@@ -838,88 +838,40 @@ class CrawlJob:
     # TRICKLE PUSH — push each file to NAS as it's downloaded
     # ========================================================================
 
-    def _is_device_reachable(self):
-        """Check if the device is reachable via SSH. Caches result for 60 seconds."""
+    def _is_nas_reachable(self):
+        """Check if the NAS is reachable via SSH. Caches result for 60 seconds."""
         now = time.time()
-        if self._device_reachable is not None and (now - self._device_check_time) < 60:
-            return self._device_reachable
+        if self._nas_reachable is not None and (now - self._nas_check_time) < 60:
+            return self._nas_reachable
 
-        if not DEVICE_HOST:
-            self._device_reachable = False
-            self._device_check_time = now
+        if not NAS_HOST or not NAS_USER or not NAS_EXPORT:
+            self._nas_reachable = False
+            self._nas_check_time = now
             return False
 
         try:
             result = subprocess.run(
-                ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
-                 DEVICE_HOST, "echo ok"],
+                ["ssh", "-i", os.path.expanduser("~/.ssh/id_ed25519"),
+                 "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
+                 "-o", "StrictHostKeyChecking=accept-new",
+                 f"{NAS_USER}@{NAS_HOST}", "echo ok"],
                 capture_output=True, text=True, timeout=10,
             )
-            self._device_reachable = (result.returncode == 0)
+            self._nas_reachable = (result.returncode == 0)
         except Exception:
-            self._device_reachable = False
+            self._nas_reachable = False
 
-        self._device_check_time = now
-        if not self._device_reachable:
-            self._log("[TRICKLE] Device not reachable, skipping push")
-        return self._device_reachable
-
-    def _ensure_nas_mounted(self):
-        """Mount the NAS via the device if not already mounted. Returns True on success."""
-        if self._nas_mounted:
-            return True
-
-        if not DEVICE_HOST or not NAS_HOST or not NAS_EXPORT:
-            self._log("[TRICKLE] NAS config incomplete, cannot mount")
-            return False
-
-        self._log("[TRICKLE] Mounting NAS on device...")
-        try:
-            result = subprocess.run(
-                ["ssh", DEVICE_HOST,
-                 f"mkdir -p {NAS_MOUNT} && sudo mount -t nfs "
-                 f"{NAS_HOST}:{NAS_EXPORT} {NAS_MOUNT} -o hard,intr,nolock,timeo=600"],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode == 0:
-                self._nas_mounted = True
-                self._log("[TRICKLE] NAS mounted successfully")
-                return True
-            else:
-                # Mount may have already been active (already mounted is not an error)
-                if "already mounted" in result.stderr.lower() or "busy" in result.stderr.lower():
-                    self._nas_mounted = True
-                    self._log("[TRICKLE] NAS was already mounted")
-                    return True
-                self._log(f"[TRICKLE] NAS mount failed: {result.stderr[:120]}")
-                return False
-        except Exception as e:
-            self._log(f"[TRICKLE] NAS mount error: {e}")
-            return False
-
-    def _unmount_nas(self):
-        """Unmount the NAS from the device. Called during run() cleanup."""
-        if not self._nas_mounted or not DEVICE_HOST:
-            return
-
-        self._log("[TRICKLE] Unmounting NAS...")
-        try:
-            subprocess.run(
-                ["ssh", DEVICE_HOST, f"sudo umount {NAS_MOUNT}"],
-                capture_output=True, text=True, timeout=10,
-            )
-            self._nas_mounted = False
-            self._log("[TRICKLE] NAS unmounted")
-        except Exception as e:
-            self._log(f"[TRICKLE] Unmount error: {e}")
+        self._nas_check_time = now
+        if not self._nas_reachable:
+            self._log("[TRICKLE] NAS not reachable, skipping push")
+        return self._nas_reachable
 
     def _trickle_push(self, filepath):
-        """Push a single downloaded file to the NAS via the device.
+        """Push a single downloaded file directly to the NAS via SCP.
 
-        - Checks device reachability (cached for 60s)
-        - Mounts NAS if not already mounted
-        - Uses rsync to push the file, preserving parent directory structure
-          relative to the staging directory
+        - Checks NAS reachability (cached for 60s)
+        - Uses SCP to push the file directly to NAS_EXPORT/NAS_ROM_SUBDIR/<system>/
+        - Sets file permissions so SSHFS on device can read it
         - Deletes the local file on success
         - Logs success/failure
 
@@ -931,12 +883,8 @@ class CrawlJob:
         if not filepath.exists():
             return False
 
-        # Check device reachability
-        if not self._is_device_reachable():
-            return False
-
-        # Mount NAS
-        if not self._ensure_nas_mounted():
+        # Check NAS reachability
+        if not self._is_nas_reachable():
             return False
 
         # Compute the relative path from staging dir
@@ -948,33 +896,65 @@ class CrawlJob:
             self._log(f"[TRICKLE] Cannot compute relative path for {filepath}")
             return False
 
-        # Target path on NAS: NAS_MOUNT/NAS_ROM_SUBDIR/snes/game.7z
-        target_dir = f"{NAS_MOUNT}/{NAS_ROM_SUBDIR}/{rel_path.parent}"
+        ssh_key = os.path.expanduser("~/.ssh/id_ed25519")
+        ssh_target = f"{NAS_USER}@{NAS_HOST}"
+        # Target path on NAS: NAS_EXPORT/NAS_ROM_SUBDIR/snes/game.7z
+        target_dir = f"{NAS_EXPORT}/{NAS_ROM_SUBDIR}/{rel_path.parent}"
 
         self._log(f"[TRICKLE] Pushing {rel_path}...")
 
         try:
-            # Ensure target directory exists
+            # Ensure target directory exists on NAS
             subprocess.run(
-                ["ssh", DEVICE_HOST, f"mkdir -p '{target_dir}'"],
+                ["ssh", "-i", ssh_key,
+                 "-o", "StrictHostKeyChecking=accept-new",
+                 "-o", "ConnectTimeout=5",
+                 ssh_target, f"mkdir -p \"{target_dir}\""],
                 capture_output=True, text=True, timeout=10,
             )
 
-            # Rsync the single file (--no-group avoids chgrp failures on NFS)
+            # Check if file already exists on NAS (--ignore-existing equivalent)
+            filename = filepath.name
+            check = subprocess.run(
+                ["ssh", "-i", ssh_key,
+                 "-o", "ConnectTimeout=5",
+                 ssh_target,
+                 f"test -f \"{target_dir}/{filename}\""],
+                capture_output=True, text=True, timeout=10,
+            )
+            if check.returncode == 0:
+                # File already exists on NAS — delete local and move on
+                filepath.unlink()
+                self._log(f"[TRICKLE] Already on NAS, cleaned local: {rel_path}")
+                return True
+
+            # SCP the file directly to NAS (modern SCP uses SFTP protocol
+            # internally, so remote paths are used as-is — no shell escaping)
+            scp_dst = f"{ssh_target}:{target_dir}/{filename}"
+
             result = subprocess.run(
-                ["rsync", "-az", "--no-group", "--ignore-existing",
-                 str(filepath),
-                 f"{DEVICE_HOST}:{target_dir}/"],
-                capture_output=True, text=True, timeout=300,
+                ["scp", "-i", ssh_key,
+                 "-o", "StrictHostKeyChecking=accept-new",
+                 "-o", "ConnectTimeout=10",
+                 str(filepath), scp_dst],
+                capture_output=True, text=True, timeout=600,
             )
 
             if result.returncode == 0:
+                # Set permissions so SSHFS on device can read the file
+                subprocess.run(
+                    ["ssh", "-i", ssh_key,
+                     "-o", "ConnectTimeout=5",
+                     ssh_target,
+                     f"chmod a+r \"{target_dir}/{filename}\""],
+                    capture_output=True, text=True, timeout=10,
+                )
                 # Delete local file on success
                 filepath.unlink()
                 self._log(f"[TRICKLE] Pushed and cleaned: {rel_path}")
                 return True
             else:
-                self._log(f"[TRICKLE] rsync failed: {result.stderr[:120]}")
+                self._log(f"[TRICKLE] SCP failed: {result.stderr[:120]}")
                 return False
 
         except subprocess.TimeoutExpired:
@@ -1587,7 +1567,6 @@ class CrawlJob:
             self.status = "stopped"
             self._log("Stopped by user.")
             self._close_browser()
-            self._unmount_nas()
             return
 
         # Mop-up pass: any discovered files that weren't downloaded during the crawl
@@ -1611,7 +1590,6 @@ class CrawlJob:
                 if self.stop_requested:
                     self.status = "stopped"
                     self._log("Stopped by user.")
-                    self._unmount_nas()
                     return
 
                 self.phase = f"Mop-up {i}/{len(remaining)}"
@@ -1623,9 +1601,6 @@ class CrawlJob:
 
                 if i < len(remaining) and not self.stop_requested:
                     time.sleep(self.delay)
-
-        # Cleanup: unmount NAS if trickle push was used
-        self._unmount_nas()
 
         self.status = "complete"
         self.phase = "All downloads complete"
@@ -1876,120 +1851,109 @@ class GUIHandler(http.server.BaseHTTPRequestHandler):
                 log("[NAS] No files to push")
                 return
 
-            # Try the shared nas-push.sh script first
-            script_dir = Path(__file__).resolve().parent
-            nas_push_script = script_dir.parent / "nas" / "nas-push.sh"
-            if nas_push_script.exists():
-                log("[NAS] Using nas-push.sh script...")
-                try:
-                    env = os.environ.copy()
-                    env["STAGING_DIR"] = str(staging)
-                    env["DEVICE_HOST"] = DEVICE_HOST
-                    env["NAS_HOST"] = NAS_HOST
-                    env["NAS_EXPORT"] = NAS_EXPORT
-                    env["NAS_MOUNT"] = NAS_MOUNT
-                    env["NAS_ROM_SUBDIR"] = NAS_ROM_SUBDIR
-                    result = subprocess.run(
-                        ["bash", str(nas_push_script)],
-                        capture_output=True, text=True, timeout=600,
-                        env=env,
-                    )
-                    for line in result.stdout.strip().split("\n"):
-                        if line.strip():
-                            log(f"[NAS] {line}")
-                    if result.returncode != 0:
-                        for line in result.stderr.strip().split("\n"):
-                            if line.strip():
-                                log(f"[NAS] ERROR: {line}")
-                    else:
-                        log("[NAS] Push complete via nas-push.sh")
+            if not NAS_HOST or not NAS_USER or not NAS_EXPORT:
+                log("[NAS] NAS config incomplete (need NAS_HOST, NAS_USER, NAS_EXPORT)")
+                return
+
+            ssh_key = os.path.expanduser("~/.ssh/id_ed25519")
+            ssh_target = f"{NAS_USER}@{NAS_HOST}"
+
+            # Check NAS is reachable
+            log("[NAS] Connecting to NAS...")
+            try:
+                rc = subprocess.run(
+                    ["ssh", "-i", ssh_key,
+                     "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
+                     "-o", "StrictHostKeyChecking=accept-new",
+                     ssh_target, "echo ok"],
+                    capture_output=True, timeout=10
+                ).returncode
+                if rc != 0:
+                    log("[NAS] Can't reach NAS. Is it on?")
                     return
-                except Exception as e:
-                    log(f"[NAS] nas-push.sh failed ({e}), falling back to built-in push")
-
-            # Fallback: built-in push logic
-            if not DEVICE_HOST:
-                log("[NAS] No DEVICE_HOST configured. Cannot push to NAS.")
+            except Exception:
+                log("[NAS] Can't reach NAS. Is it on?")
                 return
 
-            # Check device is reachable
-            log("[NAS] Connecting to device...")
-            rc = subprocess.run(
-                ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
-                 DEVICE_HOST, "echo ok"],
-                capture_output=True, timeout=10
-            ).returncode
-            if rc != 0:
-                log("[NAS] Can't reach device. Is it on?")
-                return
-
-            if not NAS_HOST or not NAS_EXPORT:
-                log("[NAS] NAS_HOST or NAS_EXPORT not configured. Cannot mount NAS.")
-                return
-
-            # Mount NAS on device
-            log("[NAS] Mounting NAS on device...")
-            rc = subprocess.run(
-                ["ssh", DEVICE_HOST,
-                 f"mkdir -p {NAS_MOUNT} && sudo mount -t nfs "
-                 f"{NAS_HOST}:{NAS_EXPORT} {NAS_MOUNT} -o hard,intr,nolock,timeo=600"],
-                capture_output=True, timeout=30
-            ).returncode
-            if rc != 0:
-                log("[NAS] Failed to mount NAS")
-                return
-
-            # Push each system directory
+            # Push each system directory via SCP
             total_files = 0
             for sdir in sorted(system_dirs):
                 system = sdir.name
-                file_count = sum(1 for f in sdir.iterdir() if f.is_file()
-                                and not f.name.endswith(".part")
-                                and f.name != ".crawler-state.json")
-                if file_count == 0:
+                files = [f for f in sdir.iterdir() if f.is_file()
+                         and not f.name.endswith(".part")
+                         and f.name != ".crawler-state.json"]
+                if not files:
                     continue
 
-                log(f"[NAS] Pushing {file_count} files to {NAS_ROM_SUBDIR}/{system}/")
+                target_dir = f"{NAS_EXPORT}/{NAS_ROM_SUBDIR}/{system}"
+                log(f"[NAS] Pushing {len(files)} files to {NAS_ROM_SUBDIR}/{system}/")
 
                 # Ensure target dir exists on NAS
                 subprocess.run(
-                    ["ssh", DEVICE_HOST,
-                     f"mkdir -p {NAS_MOUNT}/{NAS_ROM_SUBDIR}/{system}"],
+                    ["ssh", "-i", ssh_key,
+                     "-o", "StrictHostKeyChecking=accept-new",
+                     "-o", "ConnectTimeout=5",
+                     ssh_target, f"mkdir -p \"{target_dir}\""],
                     capture_output=True, timeout=10
                 )
 
-                # Rsync this system folder (--ignore-existing = never overwrite NAS files)
-                result = subprocess.run(
-                    ["rsync", "-avz", "--progress",
-                     "--ignore-existing",
-                     "--exclude=*.part",
-                     "--exclude=.crawler-state.json",
-                     f"{sdir}/",
-                     f"{DEVICE_HOST}:{NAS_MOUNT}/{NAS_ROM_SUBDIR}/{system}/"],
-                    capture_output=True, text=True, timeout=600
-                )
-                if result.returncode == 0:
-                    total_files += file_count
-                    log(f"[NAS]   Done: {NAS_ROM_SUBDIR}/{system}/ ({file_count} files)")
-                else:
-                    log(f"[NAS]   Error on {system}: {result.stderr[:200]}")
+                pushed = 0
+                for filepath in files:
+                    filename = filepath.name
+                    # Check if file already exists on NAS
+                    check = subprocess.run(
+                        ["ssh", "-i", ssh_key,
+                         "-o", "ConnectTimeout=5",
+                         ssh_target,
+                         f"test -f \"{target_dir}/{filename}\""],
+                        capture_output=True, timeout=10,
+                    )
+                    if check.returncode == 0:
+                        log(f"[NAS]   Skipping (exists): {filename}")
+                        filepath.unlink()
+                        pushed += 1
+                        continue
 
-            # Unmount
-            subprocess.run(
-                ["ssh", DEVICE_HOST, f"sudo umount {NAS_MOUNT}"],
-                capture_output=True, timeout=10
-            )
+                    # SCP the file directly (modern SCP uses SFTP — no shell escaping)
+                    scp_dst = f"{ssh_target}:{target_dir}/{filename}"
+
+                    result = subprocess.run(
+                        ["scp", "-i", ssh_key,
+                         "-o", "StrictHostKeyChecking=accept-new",
+                         "-o", "ConnectTimeout=10",
+                         str(filepath), scp_dst],
+                        capture_output=True, text=True, timeout=600,
+                    )
+                    if result.returncode == 0:
+                        # Set permissions so SSHFS on device can read the file
+                        subprocess.run(
+                            ["ssh", "-i", ssh_key,
+                             "-o", "ConnectTimeout=5",
+                             ssh_target,
+                             f"chmod a+r \"{target_dir}/{filename}\""],
+                            capture_output=True, timeout=10,
+                        )
+                        filepath.unlink()
+                        pushed += 1
+                    else:
+                        log(f"[NAS]   Error pushing {filename}: {result.stderr[:150]}")
+
+                total_files += pushed
+                log(f"[NAS]   Done: {NAS_ROM_SUBDIR}/{system}/ ({pushed} files)")
+
+            # Remove empty directories (but not the staging root)
+            for sdir in system_dirs:
+                if sdir.exists() and not any(sdir.iterdir()):
+                    sdir.rmdir()
 
             log(f"[NAS] Push complete: {total_files} files to NAS")
-            log(f"[NAS] Files are at {NAS_ROM_SUBDIR}/<system>/ on NAS")
 
             # Check if device needs new emulators for these systems
-            pushed_systems = [d.name for d in system_dirs
-                             if any(f.is_file() and not f.name.endswith(".part")
-                                    for f in d.iterdir())]
-            if pushed_systems:
-                log("[EMU] Checking if device needs new emulators...")
-                _ensure_emulators(pushed_systems, log)
+            if DEVICE_HOST:
+                pushed_systems = [d.name for d in system_dirs]
+                if pushed_systems:
+                    log("[EMU] Checking if device needs new emulators...")
+                    _ensure_emulators(pushed_systems, log)
 
         threading.Thread(target=push, daemon=True).start()
         self._json({"status": "pushing"})

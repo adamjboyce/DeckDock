@@ -166,8 +166,7 @@ if [ "$_deckdock_needs_download" = true ]; then
         _src_size="$(ssh -i "$_DECKDOCK_SSH_KEY" -o ConnectTimeout=5 \
             "${_DECKDOCK_NAS_USER}@${_DECKDOCK_NAS_HOST}" \
             "stat -c%s \"${_DECKDOCK_NAS_EXPORT}/${_rel_path}\"" 2>/dev/null || echo 0)"
-        _scp_remote="$(printf '%q' "${_DECKDOCK_NAS_EXPORT}/${_rel_path}")"
-        _scp_src="${_DECKDOCK_NAS_USER}@${_DECKDOCK_NAS_HOST}:${_scp_remote}"
+        _scp_src="${_DECKDOCK_NAS_USER}@${_DECKDOCK_NAS_HOST}:${_DECKDOCK_NAS_EXPORT}/${_rel_path}"
         scp -i "$_DECKDOCK_SSH_KEY" \
             -o StrictHostKeyChecking=accept-new \
             -o ConnectTimeout=10 \
@@ -250,6 +249,6 @@ unset _nas_dir _ext _files_list _total_bytes _total_mb _free_mb _file_count _cur
 unset _failed _src_path _filename _dst_path _tmp_dst _label _main_filename _arg _src _sz _src_rel _line _binfile
 unset _nas_remote _nas_remote_dir
 unset _original_link _link_target _deckdock_fifo _deckdock_dl_pid _deckdock_poll_pid _deckdock_zenity_pid
-unset _src_size _cur_size _rel_path _scp_src _scp_remote
+unset _src_size _cur_size _rel_path _scp_src
 unset _deckdock_launcher_pid
 unset -f _deckdock_raise_zenity
