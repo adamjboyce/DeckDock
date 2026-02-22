@@ -5,13 +5,25 @@
 DeckDock is a tool suite for setting up a retro gaming library on Linux handhelds (Steam Deck, Legion Go). It handles:
 - **Web crawler** (`crawler/crawler-gui.py`) — Browser-based GUI that crawls ROM sites, downloads, auto-sorts, compresses, and pushes to NAS
 - **Device scripts** (`device/`) — On-device services for ROM sorting, NAS streaming, save backups, emulator setup, Steam shortcut generation
-- **Deployment** (`deploy.sh`) — Pushes scripts from PC to device via SCP
+- **Unified setup** (`setup.sh`) — Single PC-side script that configures everything over SSH (11 phases)
+- **Quick deploy** (`deploy.sh`) — Fast re-deploy of scripts to device via SCP (for development)
 
 ## Architecture
 
-- **PC side (WSL2)**: Crawler GUI, deploy script, NAS push utilities
-- **Device side (SteamOS/Linux)**: Systemd services for sorting, syncing, backup. Emulators via flatpak/AppImage
+- **PC side (WSL2)**: Crawler GUI, unified setup, deploy script, NAS push utilities
+- **Device side (SteamOS/Linux)**: Systemd services for sorting, syncing, backup. Emulators via flatpak/AppImage. `emu-setup.sh` as device-side fallback
 - **NAS (UniFi Drive)**: Central ROM storage. All access via SSH/SCP (never NFS/SSHFS — causes D-state processes)
+
+## Setup Flow
+
+**Primary:** Run `./setup.sh` on PC. Does everything over SSH in 11 phases:
+1. Config wizard → 2. SSH keys → 3. Device folders → 4. Push scripts → 5. EmuDeck → 6. Core services → 7. Xbox Cloud → 8. Tailscale → 9. NAS library → 10. Verify → 11. Summary
+
+CLI: `--phase N` (resume from phase), `--skip-config` (reuse config.env), `--verify` (health check only)
+
+**Fallback:** Run `device/emu-setup.sh` directly on the device in Desktop Mode (same 11 steps, runs locally).
+
+**Development:** Run `./deploy.sh` for quick script re-deploy after code changes (no setup, just push + verify).
 
 ## Key Conventions
 
@@ -55,31 +67,44 @@ Resort utility: `crawler/resort-other.py` — re-classifies existing files in `o
 
 ## Deployment Targets
 
-Scripts deploy to device at `~/Emulation/tools/`. Service files to `~/.config/systemd/user/`.
+Scripts deploy to device at `~/Emulation/tools/`. Launchers to `~/Emulation/tools/launchers/`. Systemd-referenced scripts to `~/DeckDock/device/`. Service files to `~/.config/systemd/user/`. Device config (subset) to both `~/DeckDock/config.env` and `~/Emulation/tools/config.env`.
+
+**Config split:** PC config.env has all vars (NAS, device, crawler, IGDB). Device config.env has only the subset needed on-device (NAS_HOST, NAS_USER, NAS_EXPORT, NAS_MOUNT, NAS_ROM_SUBDIR, NAS_SAVE_SUBDIR, BACKUP_KEEP).
 
 ## File Layout
 
 ```
 DeckDock/
-  config.env              # Local config (gitignored)
-  config.example.env      # Template
-  deploy.sh               # PC → device deployment
-  setup.sh                # Interactive setup wizard
+  config.env              # Local config (gitignored) — full PC set
+  config.example.env      # Template with all vars
+  setup.sh                # Unified PC-side setup (11 phases, all via SSH)
+  deploy.sh               # Quick re-deploy for development
   crawler/
     crawler-gui.py        # Main crawler + web GUI
     title-systems.json    # Curated title→system database
     resort-other.py       # Re-sort utility for other/ files
     generate-m3u.py       # M3U playlist generator + disc audit
+    chd-identify.py       # CHD metadata reader (runs on NAS)
     requirements.txt      # Python deps
   device/
-    emu-setup.sh          # Device emulator/folder setup
+    emu-setup.sh          # Device-side setup fallback (runs locally)
     rom-sorter.sh         # Auto-sort ROMs by extension
-    add-roms-to-steam.py  # Generate Steam shortcuts
+    add-roms-to-steam.py  # Generate Steam shortcuts (direct launch)
     save-backup.sh        # Save file backup on sleep
-    nas-library-sync.sh   # NAS library sync
-    deckdock-nas-hook.sh  # NAS streaming hook
+    save-restore.sh       # Save restore GUI (from NAS backups)
+    bios-check.sh         # BIOS file verification
+    nas-mount.sh          # SSHFS NAS mount
+    nas-library-sync.sh   # NAS library sync + launcher patching
+    deckdock-nas-hook.sh  # NAS streaming hook (on-demand download)
+    deckdock-launcher.sh  # Launcher wrapper
     deckdock-storage-manager.sh  # Storage cleanup GUI
-    ...
+    deckdock-preload.sh   # Preload helper
+    deckdock-azahar.sh    # 3DS launcher (zip extraction)
+    launch-appimage.sh    # AppImage wrapper (Steam reaper fix)
+    sleep-watcher.sh      # Sleep event watcher (triggers backup)
+    drop-cleaner.sh       # Drop folder cleanup
+    fetch-boxart.py       # Box art fetcher
+    *.service, *.timer    # Systemd unit files
   nas/                    # NAS-related scripts
   docker/                 # Container configs
   docs/                   # Documentation

@@ -1,21 +1,29 @@
 #!/bin/bash
 # ============================================================================
-# DeckDock — First-Time Device Setup
+# DeckDock — First-Time Device Setup (device-side fallback)
 # ============================================================================
-# Sets up a Steam Deck or Linux handheld for retro gaming:
-#   1. Installs EmuDeck (the emulator manager)
-#   2. Creates the folder structure for ROMs, saves, tools
-#   3. Installs DeckDock device services (save backups, ROM sorter)
-#   4. Configures NAS connection for remote storage
-#   5. Sets up SSH keys for passwordless access from your PC
+# Sets up a Steam Deck or Linux handheld for retro gaming.
+# Preferred method: run setup.sh on your PC (does everything over SSH).
+# This script is the fallback for running directly on the device.
 #
-# Run this ON your handheld device (Steam Deck, Legion Go, etc.)
-# in Desktop Mode, from a terminal (Konsole).
+# Steps:
+#   1.  EmuDeck — emulator manager (system picker + installer)
+#   2.  Folder structure — ROM dirs, drop folder, saves, tools
+#   3.  DeckDock services — all scripts, launchers, systemd units
+#   4.  Xbox Cloud Gaming — browser + .desktop shortcut
+#   5.  Steam shortcuts — generate via add-roms-to-steam.py
+#   6.  Tailscale — remote access (optional)
+#   7.  NAS connection — IP, credentials (optional)
+#   8.  NAS game library — SSHFS, library sync (optional)
+#   9.  SSH key setup — passwordless access from PC
+#   10. Save settings — write config.env
+#   11. BIOS check — verify firmware files
 #
+# Run ON your handheld in Desktop Mode (Konsole terminal).
 # Usage:  bash emu-setup.sh
 # ============================================================================
 
-set -euo pipefail
+set -uo pipefail
 
 # --- Colors ---
 GREEN='\033[0;32m'
@@ -337,9 +345,11 @@ ROM_SYSTEMS=(
     nes snes gb gbc gba nds 3ds n64 gc wii switch
     psx ps2 psp dreamcast saturn segacd
     genesis gamegear mastersystem sega32x
-    atarijaguar 3do cdi
-    atari2600 atari5200 atari7800 pcengine
-    ngp wonderswan mame scummvm
+    atarijaguar atari2600 atari5200 atari7800 lynx
+    colecovision vectrex
+    3do cdi pcengine
+    ngp wonderswan wonderswancolor
+    xbox mame scummvm
 )
 
 mkdir -p "$EMU_BASE/roms"
@@ -361,24 +371,53 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 
 info "Installing DeckDock tools and services..."
 
-# Copy scripts to tools directory
-cp "$SCRIPT_DIR/rom-sorter.sh" "$EMU_BASE/tools/"
-cp "$SCRIPT_DIR/drop-cleaner.sh" "$EMU_BASE/tools/"
-cp "$SCRIPT_DIR/save-backup.sh" "$EMU_BASE/tools/"
-cp "$SCRIPT_DIR/sleep-watcher.sh" "$EMU_BASE/tools/"
-chmod +x "$EMU_BASE/tools/rom-sorter.sh"
-chmod +x "$EMU_BASE/tools/drop-cleaner.sh"
-chmod +x "$EMU_BASE/tools/save-backup.sh"
-chmod +x "$EMU_BASE/tools/sleep-watcher.sh"
+# Copy ALL scripts to tools directory
+TOOLS_SCRIPTS=(
+    save-backup.sh sleep-watcher.sh nas-mount.sh nas-library-sync.sh
+    deckdock-launcher.sh deckdock-nas-hook.sh deckdock-storage-manager.sh
+    save-restore.sh deckdock-preload.sh launch-appimage.sh
+    fetch-boxart.py add-roms-to-steam.py
+)
+for script in "${TOOLS_SCRIPTS[@]}"; do
+    if [ -f "$SCRIPT_DIR/$script" ]; then
+        cp "$SCRIPT_DIR/$script" "$EMU_BASE/tools/"
+    fi
+done
+chmod +x "$EMU_BASE/tools/"*.sh "$EMU_BASE/tools/"*.py 2>/dev/null || true
+
+# Copy launcher scripts
+mkdir -p "$EMU_BASE/tools/launchers"
+if [ -f "$SCRIPT_DIR/deckdock-azahar.sh" ]; then
+    cp "$SCRIPT_DIR/deckdock-azahar.sh" "$EMU_BASE/tools/launchers/"
+    chmod +x "$EMU_BASE/tools/launchers/"*.sh 2>/dev/null || true
+fi
+
+# Copy systemd-referenced scripts to ~/DeckDock/device/
+mkdir -p "$HOME/DeckDock/device"
+for script in rom-sorter.sh drop-cleaner.sh; do
+    if [ -f "$SCRIPT_DIR/$script" ]; then
+        cp "$SCRIPT_DIR/$script" "$HOME/DeckDock/device/"
+        chmod +x "$HOME/DeckDock/device/$script"
+    fi
+done
+
 log "Scripts installed to $EMU_BASE/tools/"
 
 # Install systemd user services
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 mkdir -p "$SYSTEMD_DIR"
 
-cp "$SCRIPT_DIR/rom-sorter.service" "$SYSTEMD_DIR/"
-cp "$SCRIPT_DIR/rom-sorter.timer" "$SYSTEMD_DIR/"
-cp "$SCRIPT_DIR/save-backup-watcher.service" "$SYSTEMD_DIR/"
+SYSTEMD_FILES=(
+    rom-sorter.service rom-sorter.timer
+    save-backup-watcher.service
+    add-roms-to-steam.service
+    nas-mount.service nas-library-sync.service nas-library-sync.timer
+)
+for svc in "${SYSTEMD_FILES[@]}"; do
+    if [ -f "$SCRIPT_DIR/$svc" ]; then
+        cp "$SCRIPT_DIR/$svc" "$SYSTEMD_DIR/"
+    fi
+done
 
 systemctl --user daemon-reload
 
@@ -473,108 +512,43 @@ Terminal=false
 XBOXEOF
         log "Xbox Cloud Gaming shortcut created."
 
-        # Also add as a Steam shortcut if possible
-        info "You can add Xbox Cloud Gaming to Steam in two ways:"
-        echo "    1. In Steam Desktop mode: Games → Add a Non-Steam Game → Xbox Cloud Gaming"
-        echo "    2. Through Steam ROM Manager (we'll set that up next)"
-        echo ""
-        echo "  Tip: In Gaming Mode, use the on-screen controls or pair an Xbox controller"
-        echo "  over Bluetooth for the best experience."
+        info "Xbox Cloud Gaming will appear as a Steam shortcut in Gaming Mode."
+        echo "  Tip: Pair an Xbox controller over Bluetooth for the best experience."
     fi
 fi
 
 # ============================================================================
-# Step 5: Steam ROM Manager — Add Games to Steam
+# Step 5: Steam Shortcuts — Add Games to Steam
 # ============================================================================
 echo ""
-echo -e "${BOLD}Step 5: Steam ROM Manager — Add Games to Steam${NC}"
+echo -e "${BOLD}Step 5: Steam Shortcuts — Add Games to Steam${NC}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Steam ROM Manager scans your game folders and adds every game to your"
-echo "Steam library automatically — with artwork, icons, and categories."
-echo "After this, all your retro games show up in Gaming Mode."
+echo "DeckDock generates Steam shortcuts directly — each ROM gets a shortcut"
+echo "that launches the right emulator. No Steam ROM Manager needed."
 echo ""
 
-# Find SRM — could be AppImage (EmuDeck installs this) or Flatpak
-SRM_CMD=""
-SRM_NAME=""
-
-if [ -f "$HOME/Emulation/tools/Steam-ROM-Manager.AppImage" ]; then
-    SRM_CMD="$HOME/Emulation/tools/Steam-ROM-Manager.AppImage"
-    SRM_NAME="AppImage"
-elif [ -f "$EMU_BASE/tools/Steam-ROM-Manager.AppImage" ]; then
-    SRM_CMD="$EMU_BASE/tools/Steam-ROM-Manager.AppImage"
-    SRM_NAME="AppImage"
-elif flatpak list 2>/dev/null | grep -q "com.steamgriddb.steam-rom-manager"; then
-    SRM_CMD="flatpak run com.steamgriddb.steam-rom-manager"
-    SRM_NAME="Flatpak"
-fi
-
-if [ -n "$SRM_CMD" ]; then
-    log "Steam ROM Manager found ($SRM_NAME)."
-    echo ""
-    echo "  You have two options:"
-    echo ""
-    echo "    1. Auto-add — Scans your ROM folders and adds everything to Steam right now."
-    echo "       (Steam must be closed for this to work.)"
-    echo ""
-    echo "    2. Open the app — Launch Steam ROM Manager so you can preview and customize"
-    echo "       which games get added and how they look."
-    echo ""
-    ask "What would you like to do? [1=Auto-add / 2=Open app / N=Skip]: "
-    read -r SRM_CHOICE
-
-    if [[ "$SRM_CHOICE" == "1" ]]; then
-        # Check if Steam is running
-        if pgrep -x steam > /dev/null 2>&1; then
-            warn "Steam is currently running. Please close it first."
-            ask "Press Enter once Steam is closed (or type 'skip' to skip)... "
-            read -r STEAM_CLOSED
-            if [[ "$STEAM_CLOSED" == "skip" ]]; then
-                warn "Skipping Steam ROM Manager. You can run it later from Desktop Mode."
-                SRM_CHOICE="skip"
-            fi
-        fi
-
-        if [[ "$SRM_CHOICE" == "1" ]]; then
-            info "Adding all games to Steam (this may take a minute)..."
-            if echo "$SRM_CMD" | grep -q "flatpak"; then
-                flatpak run com.steamgriddb.steam-rom-manager add 2>/dev/null && \
-                    log "Games added to Steam! They'll appear when you restart Steam." || \
-                    warn "Auto-add didn't work. Try opening the app instead (option 2)."
-            else
-                "$SRM_CMD" add 2>/dev/null && \
-                    log "Games added to Steam! They'll appear when you restart Steam." || \
-                    warn "Auto-add didn't work. Try opening the app instead (option 2)."
-            fi
-        fi
-    elif [[ "$SRM_CHOICE" == "2" ]]; then
-        info "Opening Steam ROM Manager..."
-        if echo "$SRM_CMD" | grep -q "flatpak"; then
-            flatpak run com.steamgriddb.steam-rom-manager &
+ADD_ROMS_SCRIPT="$EMU_BASE/tools/add-roms-to-steam.py"
+if [ -f "$ADD_ROMS_SCRIPT" ]; then
+    ask "Generate Steam shortcuts now? [Y/n]: "
+    read -r GEN_SHORTCUTS
+    if [[ ! "$GEN_SHORTCUTS" =~ ^[Nn] ]]; then
+        info "Generating Steam shortcuts..."
+        STEAM_OUT=$(python3 "$ADD_ROMS_SCRIPT" 2>&1) || true
+        TOTAL_LINE=$(echo "$STEAM_OUT" | grep "^Total:")
+        if [ -n "$TOTAL_LINE" ]; then
+            log "$TOTAL_LINE"
         else
-            "$SRM_CMD" &
+            warn "Steam shortcut generation returned no summary."
+            echo "$STEAM_OUT" | tail -5
         fi
-        SRM_PID=$!
         echo ""
-        echo "  In Steam ROM Manager:"
-        echo "    1. Click 'Preview' to see what games will be added"
-        echo "    2. Click 'Save to Steam' to add them"
-        echo "    3. Close the app when you're done"
-        echo ""
-        ask "Press Enter when you're done with Steam ROM Manager..."
-        read -r
-        wait "$SRM_PID" 2>/dev/null || true
-        log "Steam ROM Manager done."
+        info "Restart Steam to see your games in Gaming Mode."
     else
-        info "Skipping for now. You can run Steam ROM Manager anytime from Desktop Mode."
+        info "Skipping. Run later: python3 $ADD_ROMS_SCRIPT"
     fi
 else
-    warn "Steam ROM Manager isn't installed yet."
-    info "EmuDeck usually installs it. If you installed EmuDeck in Step 1,"
-    info "try running this setup again after EmuDeck finishes."
-    echo ""
-    info "Or install it manually:"
-    echo "  flatpak install --user flathub com.steamgriddb.steam-rom-manager"
+    warn "add-roms-to-steam.py not found at $ADD_ROMS_SCRIPT"
+    info "Make sure DeckDock scripts are installed (Step 3)."
 fi
 
 # ============================================================================
@@ -887,46 +861,52 @@ echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━
 echo ""
 echo "Here's what's set up:"
 echo ""
-echo "  Drop folder    $EMU_BASE/drop/"
-echo "                 Drop ROM files here — they'll be sorted automatically."
+echo "  Drop folder       $EMU_BASE/drop/"
+echo "                    Drop ROM files here — they'll be sorted automatically."
 echo ""
-echo "  ROM folders    $EMU_BASE/roms/<system>/"
-echo "                 Where your sorted games live."
+echo "  ROM folders       $EMU_BASE/roms/<system>/"
+echo "                    Where your sorted games live."
 echo ""
-echo "  Save backups   Every time you put this device to sleep,"
-echo "                 your game saves are backed up automatically."
+echo "  Save backups      Every time you put this device to sleep,"
+echo "                    your game saves are backed up automatically."
+echo ""
+echo "  Storage Manager   Manage locally cached games from Gaming Mode."
+echo "                    Available as a Steam shortcut."
+echo ""
+echo "  Save Restore      Restore saves from NAS backups via Gaming Mode."
+echo "                    Available as a Steam shortcut."
+echo ""
+echo "  Steam shortcuts   Games launch directly via the right emulator."
+echo "                    Re-run: python3 ~/Emulation/tools/add-roms-to-steam.py"
 echo ""
 if [ "$SETUP_XBOX" = true ]; then
-echo "  Xbox Cloud     Open 'Xbox Cloud Gaming' from your app menu or Steam"
-echo "                 to stream Xbox games. Requires Game Pass Ultimate."
+echo "  Xbox Cloud        Open 'Xbox Cloud Gaming' from Steam to stream Xbox"
+echo "                    games. Requires Game Pass Ultimate."
 echo ""
 fi
 if [ -n "$NAS_HOST" ]; then
-echo "  NAS backups    Saves also get pushed to your NAS at $NAS_HOST"
-echo "                 when you're on your home network."
+echo "  NAS backups       Saves also get pushed to your NAS at $NAS_HOST"
+echo "                    when you're on your home network."
 echo ""
 fi
 if [ "$SETUP_NAS_LIBRARY" = true ]; then
-echo "  NAS Library    Your full NAS game library is browsable in ES-DE."
-echo "                 Select a game — it downloads automatically and plays."
-echo "                 Syncs every 5 minutes when NAS is reachable."
+echo "  NAS Library       Your full NAS game library is browsable in ES-DE."
+echo "                    Select a game — it downloads automatically and plays."
+echo "                    Syncs every 5 minutes when NAS is reachable."
 echo ""
 fi
 if [ "$SETUP_TAILSCALE" = true ]; then
 TS_IP=$(tailscale ip -4 2>/dev/null || echo "your-tailscale-ip")
-echo "  Tailscale      Access this device from anywhere at $TS_IP"
-echo "                 Install Tailscale on your other devices too."
+echo "  Tailscale         Access this device from anywhere at $TS_IP"
+echo "                    Install Tailscale on your other devices too."
 echo ""
 fi
 echo "  Next steps:"
 echo "    1. Drop some ROMs into $EMU_BASE/drop/ to test sorting"
-if [ -z "$SRM_CMD" ] || [[ ! "$SRM_CHOICE" =~ ^[12]$ ]]; then
-echo "    2. Open Steam ROM Manager to add sorted games to Steam"
-else
-echo "    2. Restart Steam to see your newly added games"
-fi
+echo "    2. Restart Steam to see your games in Gaming Mode"
 echo "    3. From your PC, run the DeckDock crawler to download games"
 echo "       and push them to this device automatically"
+echo "    4. Use ./deploy.sh on PC for quick re-deploys after code changes"
 echo ""
 echo "  Need help?  https://github.com/adamjboyce/DeckDock"
 echo ""

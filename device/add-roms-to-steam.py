@@ -5,7 +5,7 @@ Regenerates shortcuts.vdf from scratch each run.
 Launches emulators directly (flatpak/AppImage) — bypasses EmuDeck launcher
 wrappers which run git pull + cloud sync on every launch, causing hangs.
 """
-import os, struct, re, shutil, binascii, glob
+import os, struct, re, shutil, binascii, glob, subprocess
 
 STEAM_USERDATA = os.path.expanduser("~/.local/share/Steam/userdata")
 ROMS_DIR = os.path.expanduser("~/Emulation/roms")
@@ -54,6 +54,14 @@ SYSTEM_EMULATOR = {
     "pcengine": _FP_RETROARCH,
     "mastersystem": _FP_RETROARCH, "gamegear": _FP_RETROARCH,
     "mame": _FP_RETROARCH,
+    "atarijaguar": _FP_RETROARCH,
+    "lynx": _FP_RETROARCH,
+    "ngp": _FP_RETROARCH,
+    "wonderswan": _FP_RETROARCH,
+    "wonderswancolor": _FP_RETROARCH,
+    "colecovision": _FP_RETROARCH,
+    "vectrex": _FP_RETROARCH,
+    "3do": _FP_RETROARCH,
     "xbox": _FP_XEMU,
     "scummvm": _FP_SCUMMVM,
 }
@@ -86,6 +94,14 @@ SYSTEM_LABELS = {
     "mastersystem": "Master System", "gamegear": "Game Gear",
     "mame": "Arcade", "xbox": "Xbox", "scummvm": "ScummVM",
     "pcengine": "PC Engine",
+    "atarijaguar": "Atari Jaguar",
+    "lynx": "Atari Lynx",
+    "ngp": "Neo Geo Pocket",
+    "wonderswan": "WonderSwan",
+    "wonderswancolor": "WonderSwan Color",
+    "colecovision": "ColecoVision",
+    "vectrex": "Vectrex",
+    "3do": "3DO",
 }
 
 
@@ -192,9 +208,44 @@ def main():
     ))
     idx += 1
 
+    # Entry 3: Xbox Cloud Gaming (conditional — needs a Chromium browser)
+    XBOX_BROWSERS = [
+        "com.microsoft.Edge",
+        "com.google.Chrome",
+        "org.chromium.Chromium",
+    ]
+    xbox_browser = None
+    for browser_id in XBOX_BROWSERS:
+        if subprocess.run(["flatpak", "info", browser_id],
+                          capture_output=True).returncode == 0:
+            xbox_browser = browser_id
+            break
+
+    if xbox_browser:
+        entries.append(build_entry(
+            idx, "Xbox Cloud Gaming",
+            '"' + FLATPAK + '"',
+            '"' + os.path.expanduser("~/") + '"',
+            launch_opts=f"run {xbox_browser} --kiosk --start-fullscreen --app=https://www.xbox.com/play",
+            tags=["Media"],
+        ))
+        idx += 1
+
+    # Entry 4: DeckDock Save Restore (conditional — needs script on device)
+    save_restore = os.path.expanduser("~/Emulation/tools/save-restore.sh")
+    if os.path.exists(save_restore):
+        entries.append(build_entry(
+            idx, "DeckDock Save Restore",
+            '"' + save_restore + '"',
+            '"' + os.path.expanduser("~/Emulation/tools/") + '"',
+            tags=["DeckDock"],
+        ))
+        idx += 1
+
     # Scan ROM directories for games
     added = 0
-    seen_names = {"EmulationStationDE", "DeckDock Storage Manager", "Plex HTPC"}
+    seen_names = {"EmulationStationDE", "DeckDock Storage Manager", "Plex HTPC",
+                   "Xbox Cloud Gaming", "DeckDock Save Restore"}
 
     for system in sorted(os.listdir(ROMS_DIR)):
         sys_dir = os.path.join(ROMS_DIR, system)
