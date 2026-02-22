@@ -9,6 +9,7 @@ import os, struct, re, shutil, binascii
 STEAM_USERDATA = os.path.expanduser("~/.local/share/Steam/userdata")
 ROMS_DIR = os.path.expanduser("~/Emulation/roms")
 LAUNCHERS = os.path.expanduser("~/Emulation/tools/launchers")
+NAS_MOUNT = "/tmp/nas-roms"
 
 SYSTEM_LAUNCHER = {
     "3ds": "azahar.sh", "n3ds": "azahar.sh",
@@ -151,9 +152,20 @@ def main():
     ))
     idx += 1
 
+    # Entry 1: DeckDock Storage Manager
+    storage_mgr = os.path.expanduser("~/Emulation/tools/deckdock-storage-manager.sh")
+    if os.path.exists(storage_mgr):
+        entries.append(build_entry(
+            idx, "DeckDock Storage Manager",
+            '"' + storage_mgr + '"',
+            '"' + os.path.expanduser("~/Emulation/tools/") + '"',
+            tags=["DeckDock"],
+        ))
+        idx += 1
+
     # Scan ROM directories for games
     added = 0
-    seen_names = {"EmulationStationDE"}
+    seen_names = {"EmulationStationDE", "DeckDock Storage Manager"}
 
     for system in sorted(os.listdir(ROMS_DIR)):
         sys_dir = os.path.join(ROMS_DIR, system)
@@ -178,6 +190,11 @@ def main():
             if ext not in ROM_EXTENSIONS:
                 continue
 
+            # Skip NAS symlinks — only locally-downloaded games get Steam shortcuts
+            rom_path = os.path.join(sys_dir, f)
+            if os.path.islink(rom_path) and os.path.realpath(rom_path).startswith(NAS_MOUNT):
+                continue
+
             if ext in SKIP_IF_BETTER:
                 base = os.path.splitext(f)[0]
                 skip = False
@@ -200,7 +217,6 @@ def main():
             if gamename in seen_names:
                 continue
 
-            rom_path = os.path.join(sys_dir, f)
             exe = '"' + launcher + '"'
             startdir = '"' + os.path.dirname(launcher) + '/"'
             launch_opts = '"' + rom_path + '"'
@@ -224,7 +240,8 @@ def main():
 
     size = os.path.getsize(vdf_path)
     print(f"\nWrote {vdf_path} ({size} bytes)")
-    print(f"Total: {len(entries)} shortcuts ({added} games + 1 ES-DE)")
+    pinned = len(entries) - added
+    print(f"Total: {len(entries)} shortcuts ({added} games + {pinned} pinned)")
 
 
 if __name__ == "__main__":
