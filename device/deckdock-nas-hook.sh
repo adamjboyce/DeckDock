@@ -149,6 +149,7 @@ if [ "$_deckdock_needs_download" = true ]; then
         rm -f "$_deckdock_fifo"
         mkfifo "$_deckdock_fifo"
         rsync --progress --whole-file "$_src_path" "$_tmp_dst" 2>/dev/null | \
+            tr '\r' '\n' | \
             awk '/[0-9]+%/ { for(i=1;i<=NF;i++) if($i ~ /%$/) { gsub(/%/,"",$i); print $i; fflush() } }' \
             > "$_deckdock_fifo" &
         _deckdock_rsync_pid=$!
