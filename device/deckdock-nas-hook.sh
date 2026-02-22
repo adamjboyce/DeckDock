@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# DeckDock — NAS Download Hook (sourceable)
+# DeckDock - NAS Download Hook (sourceable)
 # ============================================================================
 # Source this at the top of any EmuDeck launcher script to add NAS download
 # support. If any argument is a NAS symlink, downloads it locally with a
@@ -37,7 +37,7 @@ done
 _deckdock_needs_download=false
 _deckdock_rom_arg=""
 for _arg in "$@"; do
-    # Use readlink -f to follow multi-level symlink chains (e.g., n3ds/ → 3ds/ → NAS)
+    # Use readlink -f to follow multi-level symlink chains (e.g., n3ds/ -> 3ds/ -> NAS)
     if [ -L "$_arg" ] && [[ "$(readlink -f "$_arg" 2>/dev/null)" == "$_DECKDOCK_NAS_MOUNT"/* ]]; then
         _deckdock_needs_download=true
         _deckdock_rom_arg="$_arg"
@@ -69,7 +69,7 @@ if [ "$_deckdock_needs_download" = true ]; then
     fi
 
     # Find the original NAS symlink — may differ from $_deckdock_rom_arg if
-    # the arg is an alias symlink (e.g., n3ds/ → 3ds/ → NAS)
+    # the arg is an alias symlink (e.g., n3ds/ -> 3ds/ -> NAS)
     _original_link="$_deckdock_rom_arg"
     while [ -L "$_original_link" ]; do
         _link_target="$(readlink "$_original_link")"
@@ -146,13 +146,14 @@ if [ "$_deckdock_needs_download" = true ]; then
         # Use a FIFO so zenity runs as the foreground process (better window focus).
         # Then xdotool raises it above ES-DE's fullscreen window in gamescope.
         _deckdock_fifo="/tmp/deckdock-progress-$$"
-        mkfifo "$_deckdock_fifo" 2>/dev/null || true
+        rm -f "$_deckdock_fifo"
+        mkfifo "$_deckdock_fifo"
         rsync --progress --whole-file "$_src_path" "$_tmp_dst" 2>/dev/null | \
             awk '/[0-9]+%/ { for(i=1;i<=NF;i++) if($i ~ /%$/) { gsub(/%/,"",$i); print $i; fflush() } }' \
             > "$_deckdock_fifo" &
         _deckdock_rsync_pid=$!
         zenity --progress \
-            --title="DeckDock — Downloading" \
+            --title="DeckDock - Downloading" \
             --text="$_label" \
             --percentage=0 \
             --no-cancel \
@@ -160,8 +161,7 @@ if [ "$_deckdock_needs_download" = true ]; then
             --width=400 < "$_deckdock_fifo" 2>/dev/null &
         _deckdock_zenity_pid=$!
         # Give zenity a moment to create its window, then raise it
-        sleep 0.3
-        xdotool search --name "DeckDock" windowactivate windowraise 2>/dev/null || true
+        _deckdock_raise_zenity &
         wait $_deckdock_rsync_pid 2>/dev/null || true
         wait $_deckdock_zenity_pid 2>/dev/null || true
         rm -f "$_deckdock_fifo"
@@ -191,13 +191,18 @@ if [ "$_deckdock_needs_download" = true ]; then
         mv "$_rom_dir/$_main_filename" "$_original_link"
     fi
 
-    # Background: update Steam shortcuts, fetch artwork, and restart Steam so
-    # the new game appears in the library immediately. Steam auto-relaunches
-    # in the gamescope session — the restart is seamless in Gaming Mode.
+    # Background: update Steam shortcuts, fetch artwork, then wait for the
+    # emulator to exit before restarting Steam. The launcher's PID ($$) gets
+    # replaced by exec when the emulator starts — so we poll until that PID
+    # is gone, meaning the game session ended.
+    _deckdock_launcher_pid=$$
     (
         python3 "$HOME/Emulation/tools/add-roms-to-steam.py" >/dev/null 2>&1
         python3 "$HOME/Emulation/tools/fetch-boxart.py" >/dev/null 2>&1
-        # Brief pause so artwork writes finish before Steam restarts
+        # Wait for the emulator (which inherited our parent PID) to exit
+        while kill -0 "$_deckdock_launcher_pid" 2>/dev/null; do
+            sleep 5
+        done
         sleep 2
         steam -shutdown >/dev/null 2>&1
     ) &
@@ -209,4 +214,5 @@ unset _cfg _deckdock_needs_download _deckdock_rom_arg _nas_target _rom_dir _rom_
 unset _nas_dir _ext _files_list _total_bytes _total_mb _free_mb _file_count _current
 unset _failed _src_path _filename _dst_path _tmp_dst _label _main_filename _arg _src _sz _line _binfile
 unset _original_link _link_target _deckdock_fifo _deckdock_rsync_pid _deckdock_zenity_pid
+unset _deckdock_launcher_pid
 unset -f _deckdock_raise_zenity

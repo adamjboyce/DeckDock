@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# DeckDock — Storage Manager
+# DeckDock - Storage Manager
 # ============================================================================
 # Zenity GUI for managing locally-cached NAS games. Scans for real (non-symlink)
 # ROM files that also exist on the NAS, lets the user select which to delete,
@@ -64,7 +64,7 @@ format_size() {
 # --- Preflight: check NAS ---
 if ! mountpoint -q "$NAS_MOUNT" 2>/dev/null; then
     zenity --error \
-        --title="DeckDock — Storage Manager" \
+        --title="DeckDock - Storage Manager" \
         --text="NAS not available.\nConnect to your home network and try again." \
         --width=400 2>/dev/null || true
     exit 0
@@ -114,7 +114,7 @@ done
 
 if [ "$total_found" -eq 0 ]; then
     zenity --info \
-        --title="DeckDock — Storage Manager" \
+        --title="DeckDock - Storage Manager" \
         --text="No locally-cached NAS games found.\nAll games are already running from NAS symlinks." \
         --width=400 2>/dev/null || true
     exit 0
@@ -122,7 +122,7 @@ fi
 
 # --- Show selection dialog ---
 selection="$(zenity --list --checklist \
-    --title="DeckDock — Storage Manager" \
+    --title="DeckDock - Storage Manager" \
     --text="Select games to remove from local storage.\nThey'll be restored as NAS symlinks (playable over network)." \
     --column="Select" --column="Game" --column="System" --column="Size" \
     --column="Bytes" --column="SysID" --column="Filename" \
@@ -266,6 +266,6 @@ if [ "${#errors[@]}" -gt 0 ]; then
 fi
 
 zenity --info \
-    --title="DeckDock — Storage Manager" \
+    --title="DeckDock - Storage Manager" \
     --text="$summary" \
     --width=400 2>/dev/null || true
