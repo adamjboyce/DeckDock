@@ -7,3 +7,4 @@ nas-staging/
 .local/
 node_modules/
 .env
+.mal/
