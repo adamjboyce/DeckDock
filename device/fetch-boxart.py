@@ -67,7 +67,8 @@ ROM_EXTENSIONS = {
 SKIP_IF_BETTER = {".bin": [".cue", ".chd"], ".iso": [".chd"]}
 DISC_PATTERN = re.compile(r"^(.+?)\s*\(Disc\s*\d+\)", re.IGNORECASE)
 
-STEAM_GRID_SIZE = (600, 900)  # Steam portrait grid dimensions
+STEAM_GRID_SIZE = (600, 900)   # Steam portrait grid dimensions
+STEAM_BANNER_SIZE = (920, 430) # Steam landscape banner dimensions
 COVER_SIZE = (512, 512)       # ES-DE cover placeholder size
 
 # Short labels for placeholder art
@@ -147,6 +148,32 @@ def pad_to_steam_grid(img_data):
     tw, th = STEAM_GRID_SIZE
 
     # Scale to fit within target while preserving aspect ratio
+    scale = min(tw / src.width, th / src.height)
+    new_w = int(src.width * scale)
+    new_h = int(src.height * scale)
+    resized = src.resize((new_w, new_h), Image.LANCZOS)
+
+    canvas = Image.new("RGBA", (tw, th), (0, 0, 0, 255))
+    x = (tw - new_w) // 2
+    y = (th - new_h) // 2
+    canvas.paste(resized, (x, y), resized)
+
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def pad_to_steam_banner(img_data):
+    """Fit boxart onto a 920x430 black canvas for Steam's landscape banner.
+    Returns PNG bytes. Falls back to original data if Pillow is unavailable."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return img_data
+
+    src = Image.open(io.BytesIO(img_data)).convert("RGBA")
+    tw, th = STEAM_BANNER_SIZE
+
     scale = min(tw / src.width, th / src.height)
     new_w = int(src.width * scale)
     new_h = int(src.height * scale)
@@ -392,7 +419,8 @@ def process_steam_shortcuts(grid_dir, vdf_path, image_cache):
             continue
 
         grid_path = os.path.join(grid_dir, f'{e["appid"]}p.png')
-        if os.path.exists(grid_path):
+        banner_path = os.path.join(grid_dir, f'{e["appid"]}.png')
+        if os.path.exists(grid_path) and os.path.exists(banner_path):
             skipped += 1
             continue
 
@@ -427,10 +455,19 @@ def process_steam_shortcuts(grid_dir, vdf_path, image_cache):
                 continue
             print(f"    MISS: generated placeholder")
 
-        grid_data = pad_to_steam_grid(img_data)
-        with open(grid_path, "wb") as fh:
-            fh.write(grid_data)
-        print(f"    Steam grid: {e['appid']}p.png ({len(grid_data)} bytes)")
+        # Portrait grid (600x900) — library view
+        if not os.path.exists(grid_path):
+            grid_data = pad_to_steam_grid(img_data)
+            with open(grid_path, "wb") as fh:
+                fh.write(grid_data)
+            print(f"    Steam grid: {e['appid']}p.png ({len(grid_data)} bytes)")
+
+        # Landscape banner (920x430) — search/recent view
+        if not os.path.exists(banner_path):
+            banner_data = pad_to_steam_banner(img_data)
+            with open(banner_path, "wb") as fh:
+                fh.write(banner_data)
+            print(f"    Steam banner: {e['appid']}.png ({len(banner_data)} bytes)")
 
         # Also save to ES-DE media if not already there
         media_dir = os.path.join(EMUDECK_MEDIA, e["system"], "covers")
