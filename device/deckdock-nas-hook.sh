@@ -13,6 +13,10 @@
 # ============================================================================
 
 _DECKDOCK_NAS_MOUNT="/tmp/nas-roms"
+_DECKDOCK_NAS_HOST=""
+_DECKDOCK_NAS_USER="root"
+_DECKDOCK_NAS_EXPORT=""
+_DECKDOCK_SSH_KEY="$HOME/.ssh/id_ed25519"
 _DECKDOCK_LOCKFILE="/tmp/deckdock-download.lock"
 _DECKDOCK_TMP_SUFFIX=".deckdock-tmp"
 _DECKDOCK_MIN_FREE_MB=2048
@@ -27,8 +31,11 @@ _deckdock_raise_zenity() {
 # Load config
 for _cfg in "$HOME/DeckDock/config.env" "$HOME/Emulation/tools/config.env"; do
     if [ -f "$_cfg" ]; then
-        eval "$(grep -E '^NAS_MOUNT=' "$_cfg")"
+        eval "$(grep -E '^(NAS_MOUNT|NAS_HOST|NAS_USER|NAS_EXPORT)=' "$_cfg")"
         _DECKDOCK_NAS_MOUNT="${NAS_MOUNT:-$_DECKDOCK_NAS_MOUNT}"
+        _DECKDOCK_NAS_HOST="${NAS_HOST:-$_DECKDOCK_NAS_HOST}"
+        _DECKDOCK_NAS_USER="${NAS_USER:-$_DECKDOCK_NAS_USER}"
+        _DECKDOCK_NAS_EXPORT="${NAS_EXPORT:-$_DECKDOCK_NAS_EXPORT}"
         break
     fi
 done
@@ -47,16 +54,16 @@ done
 
 if [ "$_deckdock_needs_download" = true ]; then
     _nas_target="$(readlink -f "$_deckdock_rom_arg")"
+    _rel_path="${_nas_target#$_DECKDOCK_NAS_MOUNT/}"
 
-    # Check if NAS file is actually accessible
-    if [ ! -f "$_nas_target" ]; then
-        if mountpoint -q "$_DECKDOCK_NAS_MOUNT" 2>/dev/null; then
-            _deckdock_raise_zenity &
-            zenity --error --title="DeckDock" --text="This game was removed from the NAS library." --width=400 2>/dev/null || true
-        else
-            _deckdock_raise_zenity &
-            zenity --error --title="DeckDock" --text="NAS is not available.\nThis game hasn't been downloaded yet.\nConnect to your home network and try again." --width=400 2>/dev/null || true
-        fi
+    # Check if NAS file exists via SSH (bypasses unreliable SSHFS mount checks)
+    if ! ssh -i "$_DECKDOCK_SSH_KEY" \
+            -o StrictHostKeyChecking=accept-new \
+            -o ConnectTimeout=5 \
+            "${_DECKDOCK_NAS_USER}@${_DECKDOCK_NAS_HOST}" \
+            "test -f \"${_DECKDOCK_NAS_EXPORT}/${_rel_path}\"" 2>/dev/null; then
+        _deckdock_raise_zenity &
+        zenity --error --title="DeckDock" --text="NAS is not available or this game was removed.\nConnect to your home network and try again." --width=400 2>/dev/null || true
         exit 1
     fi
 
@@ -84,34 +91,39 @@ if [ "$_deckdock_needs_download" = true ]; then
     _ext="${_original_link##*.}"
     _ext="${_ext,,}"
 
-    # Resolve companion files
-    _files_list=""
+    # Resolve companion files (read via SSH to avoid SSHFS flakiness)
+    _nas_remote="${_DECKDOCK_NAS_EXPORT}/${_rel_path}"
+    _nas_remote_dir="$(dirname "$_nas_remote")"
+    _files_list="$_nas_target"
     case "$_ext" in
         m3u)
-            _files_list="$_nas_target"
             while IFS= read -r _line; do
                 _line="$(echo "$_line" | sed 's/\r$//')"
                 [ -z "$_line" ] && continue
                 [[ "$_line" == \#* ]] && continue
                 _files_list="$_files_list"$'\n'"$_nas_dir/$_line"
-            done < "$_nas_target"
+            done < <(ssh -i "$_DECKDOCK_SSH_KEY" -o ConnectTimeout=5 \
+                "${_DECKDOCK_NAS_USER}@${_DECKDOCK_NAS_HOST}" \
+                "cat \"${_nas_remote}\"" 2>/dev/null)
             ;;
         cue)
-            _files_list="$_nas_target"
             while IFS= read -r _binfile; do
                 _files_list="$_files_list"$'\n'"$_nas_dir/$_binfile"
-            done < <(grep -i '^[[:space:]]*FILE' "$_nas_target" | sed -E 's/^[[:space:]]*FILE[[:space:]]+"?([^"]+)"?.*/\1/')
-            ;;
-        *)
-            _files_list="$_nas_target"
+            done < <(ssh -i "$_DECKDOCK_SSH_KEY" -o ConnectTimeout=5 \
+                "${_DECKDOCK_NAS_USER}@${_DECKDOCK_NAS_HOST}" \
+                "grep -i '^[[:space:]]*FILE' \"${_nas_remote}\"" 2>/dev/null | \
+                sed -E 's/^[[:space:]]*FILE[[:space:]]+"?([^"]+)"?.*/\1/')
             ;;
     esac
 
-    # Calculate total size
+    # Calculate total size via SSH (SSHFS stat is unreliable)
     _total_bytes=0
     while IFS= read -r _src; do
-        [ -f "$_src" ] || continue
-        _sz="$(stat -c%s "$_src" 2>/dev/null || echo 0)"
+        [ -z "$_src" ] && continue
+        _src_rel="${_src#$_DECKDOCK_NAS_MOUNT/}"
+        _sz="$(ssh -i "$_DECKDOCK_SSH_KEY" -o ConnectTimeout=5 \
+            "${_DECKDOCK_NAS_USER}@${_DECKDOCK_NAS_HOST}" \
+            "stat -c%s \"${_DECKDOCK_NAS_EXPORT}/${_src_rel}\"" 2>/dev/null || echo 0)"
         _total_bytes=$((_total_bytes + _sz))
     done <<< "$_files_list"
     _total_mb=$((_total_bytes / 1024 / 1024))
@@ -134,7 +146,7 @@ if [ "$_deckdock_needs_download" = true ]; then
     _failed=false
 
     while IFS= read -r _src_path; do
-        [ -f "$_src_path" ] || continue
+        [ -z "$_src_path" ] && continue
         _current=$((_current + 1))
         _filename="$(basename "$_src_path")"
         _dst_path="$_rom_dir/$_filename"
@@ -143,16 +155,36 @@ if [ "$_deckdock_needs_download" = true ]; then
         [ "$_file_count" -gt 1 ] && _label="Downloading ${_filename} (${_current}/${_file_count})"
 
         mkdir -p "$(dirname "$_dst_path")"
-        # Use a FIFO so zenity runs as the foreground process (better window focus).
-        # Then xdotool raises it above ES-DE's fullscreen window in gamescope.
+        # Download via SCP directly over SSH — bypasses NFS entirely.
+        # NFS v3 hard mounts stall on large reads, creating unkillable D-state
+        # processes. SCP over SSH is reliable and gives us file-size polling.
         _deckdock_fifo="/tmp/deckdock-progress-$$"
         rm -f "$_deckdock_fifo"
         mkfifo "$_deckdock_fifo"
-        rsync --progress --whole-file "$_src_path" "$_tmp_dst" 2>/dev/null | \
-            tr '\r' '\n' | \
-            awk '/[0-9]+%/ { for(i=1;i<=NF;i++) if($i ~ /%$/) { gsub(/%/,"",$i); print $i; fflush() } }' \
-            > "$_deckdock_fifo" &
-        _deckdock_rsync_pid=$!
+        # Translate mount path to remote path and get size via SSH
+        _rel_path="${_src_path#$_DECKDOCK_NAS_MOUNT/}"
+        _src_size="$(ssh -i "$_DECKDOCK_SSH_KEY" -o ConnectTimeout=5 \
+            "${_DECKDOCK_NAS_USER}@${_DECKDOCK_NAS_HOST}" \
+            "stat -c%s \"${_DECKDOCK_NAS_EXPORT}/${_rel_path}\"" 2>/dev/null || echo 0)"
+        _scp_remote="$(printf '%q' "${_DECKDOCK_NAS_EXPORT}/${_rel_path}")"
+        _scp_src="${_DECKDOCK_NAS_USER}@${_DECKDOCK_NAS_HOST}:${_scp_remote}"
+        scp -i "$_DECKDOCK_SSH_KEY" \
+            -o StrictHostKeyChecking=accept-new \
+            -o ConnectTimeout=10 \
+            "$_scp_src" "$_tmp_dst" >/dev/null 2>&1 &
+        _deckdock_dl_pid=$!
+        # Poll file size and feed percentage to zenity via FIFO
+        (
+            while kill -0 "$_deckdock_dl_pid" 2>/dev/null; do
+                _cur_size="$(stat -c%s "$_tmp_dst" 2>/dev/null || echo 0)"
+                if [ "$_src_size" -gt 0 ]; then
+                    echo $((_cur_size * 100 / _src_size))
+                fi
+                sleep 1
+            done
+            echo 100
+        ) > "$_deckdock_fifo" &
+        _deckdock_poll_pid=$!
         zenity --progress \
             --title="DeckDock - Downloading" \
             --text="$_label" \
@@ -163,7 +195,8 @@ if [ "$_deckdock_needs_download" = true ]; then
         _deckdock_zenity_pid=$!
         # Give zenity a moment to create its window, then raise it
         _deckdock_raise_zenity &
-        wait $_deckdock_rsync_pid 2>/dev/null || true
+        wait $_deckdock_dl_pid 2>/dev/null || true
+        wait $_deckdock_poll_pid 2>/dev/null || true
         wait $_deckdock_zenity_pid 2>/dev/null || true
         rm -f "$_deckdock_fifo"
 
@@ -193,27 +226,30 @@ if [ "$_deckdock_needs_download" = true ]; then
     fi
 
     # Background: update Steam shortcuts, fetch artwork, then wait for the
-    # emulator to exit before restarting Steam. The launcher's PID ($$) gets
-    # replaced by exec when the emulator starts — so we poll until that PID
-    # is gone, meaning the game session ended.
+    # emulator to exit before restarting Steam. Uses setsid to detach from
+    # the launcher's process group — Steam's reaper kills all children when
+    # the game exits, which would kill this background work otherwise.
     _deckdock_launcher_pid=$$
-    (
-        python3 "$HOME/Emulation/tools/add-roms-to-steam.py" >/dev/null 2>&1
-        python3 "$HOME/Emulation/tools/fetch-boxart.py" >/dev/null 2>&1
-        # Wait for the emulator (which inherited our parent PID) to exit
-        while kill -0 "$_deckdock_launcher_pid" 2>/dev/null; do
+    setsid bash -c "
+        python3 \"\$HOME/Emulation/tools/add-roms-to-steam.py\" >/dev/null 2>&1
+        python3 \"\$HOME/Emulation/tools/fetch-boxart.py\" >/dev/null 2>&1
+        # Wait for the emulator (which inherited the launcher PID) to exit
+        while kill -0 $_deckdock_launcher_pid 2>/dev/null; do
             sleep 5
         done
         sleep 2
         steam -shutdown >/dev/null 2>&1
-    ) &
+    " &
 fi
 
 # Clean up internal variables — the sourcing script continues as normal
-unset _DECKDOCK_NAS_MOUNT _DECKDOCK_LOCKFILE _DECKDOCK_TMP_SUFFIX _DECKDOCK_MIN_FREE_MB
+unset _DECKDOCK_NAS_MOUNT _DECKDOCK_NAS_HOST _DECKDOCK_NAS_USER _DECKDOCK_NAS_EXPORT _DECKDOCK_SSH_KEY
+unset _DECKDOCK_LOCKFILE _DECKDOCK_TMP_SUFFIX _DECKDOCK_MIN_FREE_MB
 unset _cfg _deckdock_needs_download _deckdock_rom_arg _nas_target _rom_dir _rom_name
 unset _nas_dir _ext _files_list _total_bytes _total_mb _free_mb _file_count _current
-unset _failed _src_path _filename _dst_path _tmp_dst _label _main_filename _arg _src _sz _line _binfile
-unset _original_link _link_target _deckdock_fifo _deckdock_rsync_pid _deckdock_zenity_pid
+unset _failed _src_path _filename _dst_path _tmp_dst _label _main_filename _arg _src _sz _src_rel _line _binfile
+unset _nas_remote _nas_remote_dir
+unset _original_link _link_target _deckdock_fifo _deckdock_dl_pid _deckdock_poll_pid _deckdock_zenity_pid
+unset _src_size _cur_size _rel_path _scp_src _scp_remote
 unset _deckdock_launcher_pid
 unset -f _deckdock_raise_zenity

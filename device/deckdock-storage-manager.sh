@@ -12,21 +12,27 @@
 # Usage: deckdock-storage-manager.sh
 # ============================================================================
 
-set -euo pipefail
+set -uo pipefail
 
 # --- Config ---
 NAS_MOUNT="/tmp/nas-roms"
 NAS_ROM_SUBDIR="roms"
+NAS_HOST=""
+NAS_USER="root"
+NAS_EXPORT=""
+SSH_KEY="$HOME/.ssh/id_ed25519"
 ROMS_DIR="$HOME/Emulation/roms"
 
 for config in "$HOME/DeckDock/config.env" "$HOME/Emulation/tools/config.env"; do
     if [ -f "$config" ]; then
-        eval "$(grep -E '^(NAS_MOUNT|NAS_ROM_SUBDIR)=' "$config")"
+        eval "$(grep -E '^(NAS_MOUNT|NAS_ROM_SUBDIR|NAS_HOST|NAS_USER|NAS_EXPORT)=' "$config")"
         break
     fi
 done
 
 NAS_ROM_DIR="$NAS_MOUNT/$NAS_ROM_SUBDIR"
+NAS_REMOTE_ROMS="$NAS_EXPORT/$NAS_ROM_SUBDIR"
+_ssh_cmd=(ssh -i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 "${NAS_USER}@${NAS_HOST}")
 
 # --- Human-readable system labels ---
 declare -A SYSTEM_LABELS=(
@@ -61,8 +67,8 @@ format_size() {
     fi
 }
 
-# --- Preflight: check NAS ---
-if ! mountpoint -q "$NAS_MOUNT" 2>/dev/null; then
+# --- Preflight: check NAS via SSH (SSHFS mountpoint check is unreliable) ---
+if ! "${_ssh_cmd[@]}" "test -d \"${NAS_REMOTE_ROMS}\"" 2>/dev/null; then
     zenity --error \
         --title="DeckDock - Storage Manager" \
         --text="NAS not available.\nConnect to your home network and try again." \
@@ -77,18 +83,22 @@ fi
 game_list=()    # zenity row data: FALSE|system|filename|size_human|size_bytes|local_path
 total_found=0
 
+# Fetch all NAS ROM filenames in one SSH call (system/filename per line)
+_nas_all="$("${_ssh_cmd[@]}" "find \"${NAS_REMOTE_ROMS}\" -maxdepth 2 -type f -printf '%P\n'" 2>/dev/null)" || _nas_all=""
+
 for sys_dir in "$ROMS_DIR"/*/; do
     [ -d "$sys_dir" ] || continue
     system="$(basename "$sys_dir")"
-    nas_sys_dir="$NAS_ROM_DIR/$system"
 
     # For alias systems, check the source system's NAS dir
-    check_nas_dir="$nas_sys_dir"
+    check_system="$system"
     if [ -n "${ALIAS_TARGETS[$system]:-}" ]; then
-        check_nas_dir="$NAS_ROM_DIR/${ALIAS_TARGETS[$system]}"
+        check_system="${ALIAS_TARGETS[$system]}"
     fi
 
-    [ -d "$check_nas_dir" ] || continue
+    # Filter NAS file list for this system
+    nas_file_list="$(echo "$_nas_all" | sed -n "s|^${check_system}/||p")"
+    [ -z "$nas_file_list" ] && continue
 
     for local_file in "$sys_dir"*; do
         [ -f "$local_file" ] || continue
@@ -96,10 +106,9 @@ for sys_dir in "$ROMS_DIR"/*/; do
         [ -L "$local_file" ] && continue
 
         filename="$(basename "$local_file")"
-        nas_file="$check_nas_dir/$filename"
 
         # Must have a matching file on NAS
-        [ -f "$nas_file" ] || continue
+        echo "$nas_file_list" | grep -qFx "$filename" || continue
 
         size_bytes="$(stat -c%s "$local_file" 2>/dev/null || echo 0)"
         size_human="$(format_size "$size_bytes")"
@@ -127,7 +136,7 @@ selection="$(zenity --list --checklist \
     --column="Select" --column="Game" --column="System" --column="Size" \
     --column="Bytes" --column="SysID" --column="Filename" \
     --hide-column=5,6,7 \
-    --width=600 --height=500 \
+    --width=800 --height=500 \
     --print-column=5,6,7 \
     --separator='|' \
     "${game_list[@]}" 2>/dev/null)" || exit 0
@@ -201,51 +210,45 @@ while [ "$i" -lt "${#items[@]}" ]; do
         fi
     done
 
-    # Restore NAS symlink for the main file
-    if [ -f "$nas_path" ]; then
-        ln -sf "$nas_path" "$local_path"
-    fi
+    # Restore NAS symlink for the main file (point to mount path — resolves when NAS is mounted)
+    ln -sf "$nas_path" "$local_path"
 
     # For alias systems, also restore the alias symlink in the alias dir
     if [ -n "${ALIAS_TARGETS[$system]:-}" ]; then
         src_system="${ALIAS_TARGETS[$system]}"
         src_link="$ROMS_DIR/$src_system/$filename"
         # Restore the source system's NAS symlink if needed
-        if [ ! -L "$src_link" ] && [ -f "$NAS_ROM_DIR/$src_system/$filename" ]; then
+        if [ ! -L "$src_link" ]; then
             ln -sf "$NAS_ROM_DIR/$src_system/$filename" "$src_link"
         fi
         # Re-point the alias to the source
         ln -sf "$src_link" "$local_path"
     fi
 
-    # Restore companion symlinks for multi-disc games
+    # Restore companion symlinks for multi-disc games (read file lists via SSH)
+    nas_remote_path="${NAS_REMOTE_ROMS}/${nas_system}/${filename}"
     case "$ext" in
         m3u)
-            if [ -f "$nas_path" ]; then
-                while IFS= read -r line; do
-                    line="$(echo "$line" | sed 's/\r$//')"
-                    [ -z "$line" ] && continue
-                    [[ "$line" == \#* ]] && continue
-                    nas_companion="$nas_dir/$line"
-                    local_companion="$local_dir/$line"
-                    if [ -f "$nas_companion" ] && [ ! -f "$local_companion" ]; then
-                        ln -sf "$nas_companion" "$local_companion"
-                    fi
-                done < <(cat "$local_path" 2>/dev/null || cat "$nas_path")
-            fi
+            while IFS= read -r line; do
+                line="$(echo "$line" | sed 's/\r$//')"
+                [ -z "$line" ] && continue
+                [[ "$line" == \#* ]] && continue
+                nas_companion="$nas_dir/$line"
+                local_companion="$local_dir/$line"
+                if [ ! -f "$local_companion" ]; then
+                    ln -sf "$nas_companion" "$local_companion"
+                fi
+            done < <("${_ssh_cmd[@]}" "cat \"${nas_remote_path}\"" 2>/dev/null)
             ;;
         cue)
-            if [ -f "$nas_path" ]; then
-                cue_source="$local_path"
-                [ -L "$cue_source" ] && cue_source="$nas_path"
-                while IFS= read -r binfile; do
-                    nas_companion="$nas_dir/$binfile"
-                    local_companion="$local_dir/$binfile"
-                    if [ -f "$nas_companion" ] && [ ! -f "$local_companion" ]; then
-                        ln -sf "$nas_companion" "$local_companion"
-                    fi
-                done < <(grep -i '^[[:space:]]*FILE' "$cue_source" | sed -E 's/^[[:space:]]*FILE[[:space:]]+"?([^"]+)"?.*/\1/')
-            fi
+            while IFS= read -r binfile; do
+                nas_companion="$nas_dir/$binfile"
+                local_companion="$local_dir/$binfile"
+                if [ ! -f "$local_companion" ]; then
+                    ln -sf "$nas_companion" "$local_companion"
+                fi
+            done < <("${_ssh_cmd[@]}" "grep -i '^[[:space:]]*FILE' \"${nas_remote_path}\"" 2>/dev/null | \
+                sed -E 's/^[[:space:]]*FILE[[:space:]]+"?([^"]+)"?.*/\1/')
             ;;
     esac
 
@@ -253,10 +256,13 @@ while [ "$i" -lt "${#items[@]}" ]; do
     cleaned=$((cleaned + 1))
 done
 
-# --- Post-cleanup: update Steam shortcuts in background ---
-(
+# --- Post-cleanup: update Steam shortcuts and restart Steam to reload ---
+# Use setsid to detach from Steam's reaper (kills all children on exit)
+setsid bash -c '
     python3 "$HOME/Emulation/tools/add-roms-to-steam.py" >/dev/null 2>&1
-) &
+    sleep 2
+    steam -shutdown >/dev/null 2>&1
+' &
 
 # --- Summary ---
 freed_human="$(format_size "$freed_bytes")"
