@@ -4,7 +4,7 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=%h/DeckDock/device/sleep-watcher.sh
+ExecStart=/bin/bash %h/Emulation/tools/sleep-watcher.sh
 Restart=always
 RestartSec=5
 
