@@ -17,6 +17,13 @@ _DECKDOCK_LOCKFILE="/tmp/deckdock-download.lock"
 _DECKDOCK_TMP_SUFFIX=".deckdock-tmp"
 _DECKDOCK_MIN_FREE_MB=2048
 
+# Raise a zenity window above ES-DE's fullscreen window in gamescope.
+# Without this, zenity renders behind ES-DE and the user sees a black screen.
+_deckdock_raise_zenity() {
+    sleep 0.3
+    xdotool search --name "DeckDock" windowactivate windowraise 2>/dev/null || true
+}
+
 # Load config
 for _cfg in "$HOME/DeckDock/config.env" "$HOME/Emulation/tools/config.env"; do
     if [ -f "$_cfg" ]; then
@@ -44,8 +51,10 @@ if [ "$_deckdock_needs_download" = true ]; then
     # Check if NAS file is actually accessible
     if [ ! -f "$_nas_target" ]; then
         if mountpoint -q "$_DECKDOCK_NAS_MOUNT" 2>/dev/null; then
+            _deckdock_raise_zenity &
             zenity --error --title="DeckDock" --text="This game was removed from the NAS library." --width=400 2>/dev/null || true
         else
+            _deckdock_raise_zenity &
             zenity --error --title="DeckDock" --text="NAS is not available.\nThis game hasn't been downloaded yet.\nConnect to your home network and try again." --width=400 2>/dev/null || true
         fi
         exit 1
@@ -54,6 +63,7 @@ if [ "$_deckdock_needs_download" = true ]; then
     # Acquire lock
     exec 9>"$_DECKDOCK_LOCKFILE"
     if ! flock -n 9; then
+        _deckdock_raise_zenity &
         zenity --error --title="DeckDock" --text="Another download is in progress.\nPlease wait and try again." --width=400 2>/dev/null || true
         exit 1
     fi
@@ -109,6 +119,7 @@ if [ "$_deckdock_needs_download" = true ]; then
     # Check disk space
     _free_mb="$(df --output=avail -m "$_rom_dir" | tail -1 | tr -d ' ')"
     if [ "$_free_mb" -lt "$((_total_mb + _DECKDOCK_MIN_FREE_MB))" ]; then
+        _deckdock_raise_zenity &
         zenity --error --title="DeckDock" --text="Not enough disk space.\nNeed ~${_total_mb}MB but only ${_free_mb}MB free." --width=400 2>/dev/null || true
         flock -u 9
         exit 1
@@ -132,15 +143,28 @@ if [ "$_deckdock_needs_download" = true ]; then
         [ "$_file_count" -gt 1 ] && _label="Downloading ${_filename} (${_current}/${_file_count})"
 
         mkdir -p "$(dirname "$_dst_path")"
+        # Use a FIFO so zenity runs as the foreground process (better window focus).
+        # Then xdotool raises it above ES-DE's fullscreen window in gamescope.
+        _deckdock_fifo="/tmp/deckdock-progress-$$"
+        mkfifo "$_deckdock_fifo" 2>/dev/null || true
         rsync --progress --whole-file "$_src_path" "$_tmp_dst" 2>/dev/null | \
-            awk '/[0-9]+%/ { for(i=1;i<=NF;i++) if($i ~ /%$/) { gsub(/%/,"",$i); print $i; fflush() } }' | \
-            zenity --progress \
-                --title="DeckDock — Downloading" \
-                --text="$_label" \
-                --percentage=0 \
-                --no-cancel \
-                --auto-close \
-                --width=400 2>/dev/null || true
+            awk '/[0-9]+%/ { for(i=1;i<=NF;i++) if($i ~ /%$/) { gsub(/%/,"",$i); print $i; fflush() } }' \
+            > "$_deckdock_fifo" &
+        _deckdock_rsync_pid=$!
+        zenity --progress \
+            --title="DeckDock — Downloading" \
+            --text="$_label" \
+            --percentage=0 \
+            --no-cancel \
+            --auto-close \
+            --width=400 < "$_deckdock_fifo" 2>/dev/null &
+        _deckdock_zenity_pid=$!
+        # Give zenity a moment to create its window, then raise it
+        sleep 0.3
+        xdotool search --name "DeckDock" windowactivate windowraise 2>/dev/null || true
+        wait $_deckdock_rsync_pid 2>/dev/null || true
+        wait $_deckdock_zenity_pid 2>/dev/null || true
+        rm -f "$_deckdock_fifo"
 
         if [ -f "$_tmp_dst" ]; then
             mv "$_tmp_dst" "$_dst_path"
@@ -153,6 +177,7 @@ if [ "$_deckdock_needs_download" = true ]; then
     flock -u 9
 
     if [ "$_failed" = true ]; then
+        _deckdock_raise_zenity &
         zenity --error --title="DeckDock" --text="Download failed.\nThe game will re-download next time." --width=400 2>/dev/null || true
         find "$_rom_dir" -name "*${_DECKDOCK_TMP_SUFFIX}" -delete 2>/dev/null || true
         exit 1
@@ -166,11 +191,15 @@ if [ "$_deckdock_needs_download" = true ]; then
         mv "$_rom_dir/$_main_filename" "$_original_link"
     fi
 
-    # Background: update Steam shortcuts and fetch artwork for the new local game.
-    # VDF changes take effect on next Steam restart; artwork is immediate for ES-DE.
+    # Background: update Steam shortcuts, fetch artwork, and restart Steam so
+    # the new game appears in the library immediately. Steam auto-relaunches
+    # in the gamescope session — the restart is seamless in Gaming Mode.
     (
         python3 "$HOME/Emulation/tools/add-roms-to-steam.py" >/dev/null 2>&1
         python3 "$HOME/Emulation/tools/fetch-boxart.py" >/dev/null 2>&1
+        # Brief pause so artwork writes finish before Steam restarts
+        sleep 2
+        steam -shutdown >/dev/null 2>&1
     ) &
 fi
 
@@ -179,4 +208,5 @@ unset _DECKDOCK_NAS_MOUNT _DECKDOCK_LOCKFILE _DECKDOCK_TMP_SUFFIX _DECKDOCK_MIN_
 unset _cfg _deckdock_needs_download _deckdock_rom_arg _nas_target _rom_dir _rom_name
 unset _nas_dir _ext _files_list _total_bytes _total_mb _free_mb _file_count _current
 unset _failed _src_path _filename _dst_path _tmp_dst _label _main_filename _arg _src _sz _line _binfile
-unset _original_link _link_target
+unset _original_link _link_target _deckdock_fifo _deckdock_rsync_pid _deckdock_zenity_pid
+unset -f _deckdock_raise_zenity
