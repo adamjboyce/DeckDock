@@ -736,7 +736,7 @@ EXT_TO_SYSTEM = {
     ".32x": "sega32x",
     ".cdi": "dreamcast", ".gdi": "dreamcast",
     ".a26": "atari2600", ".a52": "atari5200", ".a78": "atari7800",
-    ".lnx": "atarilynx", ".jag": "atarijaguar",
+    ".lnx": "atarilynx", ".lyx": "atarilynx", ".jag": "atarijaguar",
     ".pce": "pcengine",
     ".ngp": "ngp", ".ngc": "ngpc",
     ".ws": "wonderswan", ".wsc": "wonderswancolor",

@@ -690,72 +690,362 @@ def _read_chd_sector_data(filepath_or_bytes, max_read=512 * 1024):
     return bytes(result) if len(result) >= 16 else None
 
 
+def _ssh_read_bytes(remote_path, byte_count, timeout=60):
+    """Read raw bytes from a file on NAS via SSH head -c."""
+    try:
+        result = subprocess.run(
+            ["ssh", "-n", f"{NAS_USER}@{NAS_HOST}",
+             f"head -c {byte_count} \"{remote_path}\""],
+            capture_output=True, timeout=timeout,
+        )
+        if result.returncode != 0 or not result.stdout:
+            return None
+        return result.stdout
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def _ssh_unzip_first_file(remote_path, byte_count=0x20000):
+    """Extract the first file from a remote zip and return its header bytes.
+
+    Uses 'busybox unzip -p' over SSH to stream the first file's contents to stdout,
+    then reads up to byte_count bytes for header analysis.
+    """
+    # First, list the zip contents to find the first real file
+    try:
+        result = subprocess.run(
+            ["ssh", "-n", f"{NAS_USER}@{NAS_HOST}",
+             f"busybox unzip -l \"{remote_path}\" 2>/dev/null"],
+            capture_output=True, text=True, timeout=15,
+        )
+        # busybox unzip returns 1 for large/zip64 files but still outputs listing
+        if not result.stdout:
+            return None, None
+    except (subprocess.TimeoutExpired, OSError):
+        return None, None
+
+    # Parse busybox unzip -l output to find the first ROM/disc file
+    # Format: "  12345  2024-01-01 12:00   filename with spaces.ext"
+    line_re = re.compile(r"^\s*\d+\s+\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}\s{3}(.+)$")
+    inner_name = None
+    for line in result.stdout.splitlines():
+        m = line_re.match(line)
+        if not m:
+            continue
+        candidate = m.group(1).strip()
+        if candidate.endswith("/") or not candidate:
+            continue
+        # Check if it looks like a ROM/disc file
+        cext = Path(candidate).suffix.lower()
+        if cext in (".bin", ".iso", ".img", ".cue", ".gdi",
+                     ".nes", ".smc", ".sfc", ".n64", ".z64", ".v64",
+                     ".md", ".gen", ".smd", ".32x", ".gg", ".sms",
+                     ".gb", ".gbc", ".gba", ".nds", ".3ds", ".cia",
+                     ".a26", ".a52", ".a78", ".lnx", ".jag", ".j64",
+                     ".pce", ".ngp", ".col", ".sg", ".ws", ".wsc",
+                     ".chd", ".pbp", ".cso", ".ciso"):
+            inner_name = candidate
+            break
+
+    if not inner_name:
+        return None, None
+
+    # Extract that file to stdout and read header bytes
+    try:
+        result = subprocess.run(
+            ["ssh", "-n", f"{NAS_USER}@{NAS_HOST}",
+             f"busybox unzip -p \"{remote_path}\" \"{inner_name}\" 2>/dev/null | head -c {byte_count}"],
+            capture_output=True, timeout=30,
+        )
+        if result.returncode not in (0, 141) or not result.stdout:
+            # 141 = SIGPIPE from head, that's fine
+            return None, None
+        return result.stdout, inner_name
+    except (subprocess.TimeoutExpired, OSError):
+        return None, None
+
+
 def _read_nas_header(filename, use_nas):
-    """Read header bytes from a file for system identification.
+    """Read header bytes from a file on NAS for system identification.
 
-    For NAS: uses SSH dd to read first bytes remotely.
-    For local: reads bytes directly from file.
-
-    For CHD files: reads enough of the CHD to decompress sector data.
-    For raw disc images (.iso, .bin, .img): reads first 64KB directly.
+    Handles:
+    - CHD files: reads 512KB of container, decompresses to get sector data
+    - Raw disc images (.iso, .bin, .img): reads first 128KB directly
+    - ZIP archives: extracts first ROM file inside, reads its header bytes
 
     Returns raw disc/ROM data bytes or None.
     """
     ext = Path(filename).suffix.lower()
-    is_chd = ext == ".chd"
+    remote_path = f"{NAS_EXPORT}/{NAS_ROM_SUBDIR}/other/{filename}"
 
-    # Amount of raw file to read
-    # CHD needs more (header + map + compressed hunks)
-    read_bytes = 512 * 1024 if is_chd else 0x20000
+    if ext == ".chd":
+        raw = _ssh_read_bytes(remote_path, 512 * 1024)
+        if not raw:
+            return None
+        return _read_chd_sector_data(raw)
 
+    elif ext in (".iso", ".bin", ".img"):
+        return _ssh_read_bytes(remote_path, 0x20000)
+
+    elif ext == ".zip":
+        data, inner_name = _ssh_unzip_first_file(remote_path)
+        if data and inner_name:
+            inner_ext = Path(inner_name).suffix.lower()
+            # If the inner file is a CHD, we'd need full CHD parsing
+            # (unlikely — CHDs aren't typically zipped)
+            if inner_ext == ".chd":
+                return _read_chd_sector_data(data)
+            # CISO: decompress container to get raw disc data
+            if inner_ext == ".ciso":
+                return _decompress_ciso_header(data)
+            return data
+        return None
+
+    return None
+
+
+def _ensure_chd_identify_on_nas():
+    """Copy chd-identify.py to the NAS if not already present."""
+    local_script = Path(__file__).parent / "chd-identify.py"
+    if not local_script.exists():
+        return False
+    try:
+        # Check if already present
+        result = subprocess.run(
+            ["ssh", "-n", f"{NAS_USER}@{NAS_HOST}", "test -f /tmp/chd-identify.py"],
+            capture_output=True, timeout=10,
+        )
+        if result.returncode != 0:
+            subprocess.run(
+                ["scp", str(local_script), f"{NAS_USER}@{NAS_HOST}:/tmp/chd-identify.py"],
+                capture_output=True, timeout=15,
+            )
+        return True
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def _classify_chd_via_metadata(filename, use_nas):
+    """Classify a CHD file by reading its track metadata (CHT2 entries).
+
+    CHD v5 metadata contains track type info:
+    - MODE2_RAW track 1 → PSX
+    - All AUDIO tracks → 3DO
+    - MODE1_RAW → ambiguous (Saturn, Sega CD, Dreamcast, etc.)
+
+    For NAS files, runs chd-identify.py on the NAS via SSH.
+    """
     if use_nas:
         remote_path = f"{NAS_EXPORT}/{NAS_ROM_SUBDIR}/other/{filename}"
+        _ensure_chd_identify_on_nas()
         try:
             result = subprocess.run(
                 ["ssh", "-n", f"{NAS_USER}@{NAS_HOST}",
-                 f"dd if=\"{remote_path}\" bs=1 count={read_bytes} 2>/dev/null"],
-                capture_output=True, timeout=30,
+                 f"python3 /tmp/chd-identify.py \"{remote_path}\""],
+                capture_output=True, text=True, timeout=15,
             )
-            if result.returncode != 0 or not result.stdout:
+            if not result.stdout.strip():
                 return None
-            raw = result.stdout
         except (subprocess.TimeoutExpired, OSError):
             return None
-    else:
-        return None  # Local path handled by caller
 
-    if is_chd:
-        return _read_chd_sector_data(raw)
-    else:
-        return raw
+        # chd-identify.py outputs: "system\tfilename" or "unknown\tfilename"
+        line = result.stdout.strip().splitlines()[0]
+        system = line.split("\t")[0].strip()
+        if system and system not in ("unknown", "unreadable", "error"):
+            return system
+
+    return None
+
+
+def _decompress_ciso_header(data):
+    """Extract raw disc data from a CISO (Compressed ISO) container.
+
+    CISO format (PS2/GC variant):
+    - Bytes 0-3: "CISO" magic
+    - Bytes 4-7: block_size (uint32 LE)
+    - Bytes 8+: 1-byte-per-block index (0x01=present, 0x00=absent)
+    - Data aligned to 0x8000 offset, blocks stored sequentially
+
+    Returns raw disc data (first block, enough for sector 0 + sector 16) or None.
+    """
+    if len(data) < 12 or data[:4] != b"CISO":
+        return None
+
+    block_size = struct.unpack("<I", data[4:8])[0]
+    if block_size < 2048 or block_size > 64 * 1024 * 1024:
+        return None
+
+    # Data starts at offset 0x8000 (observed empirically — CISO aligns block
+    # data to this offset, with index + padding between header and data)
+    data_offset = 0x8000
+    if len(data) <= data_offset:
+        return None
+
+    # Return raw disc data starting at the data offset
+    # First block contains sector 0; if block_size >= 0x10000,
+    # it also contains sector 16 (PVD at disc offset 0x8000)
+    return data[data_offset:]
+
+
+def _peek_nas_archive_system(filename):
+    """Peek inside a remote archive to detect system from contained extensions.
+
+    Like _peek_archive_system in crawler-gui.py but works over SSH.
+    Strategy 1: Match inner file extensions to known system mappings.
+    Strategy 2: Extract header bytes from .iso/.ciso inside the zip and
+                run binary header analysis.
+    Returns system slug or None.
+    """
+    ext = Path(filename).suffix.lower()
+    remote_path = f"{NAS_EXPORT}/{NAS_ROM_SUBDIR}/other/{filename}"
+
+    if ext == ".zip":
+        try:
+            result = subprocess.run(
+                ["ssh", "-n", f"{NAS_USER}@{NAS_HOST}",
+                 f"busybox unzip -l \"{remote_path}\" 2>/dev/null"],
+                capture_output=True, text=True, timeout=15,
+            )
+            # busybox unzip returns 1 for large/zip64 files but still outputs listing
+            if not result.stdout:
+                return None
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+
+        # Import EXT_TO_SYSTEM equivalent for extension matching
+        ext_map = {
+            ".nes": "nes", ".unf": "nes",
+            ".sfc": "snes", ".smc": "snes",
+            ".gb": "gb", ".gbc": "gbc", ".gba": "gba",
+            ".nds": "nds", ".3ds": "3ds", ".cia": "3ds", ".cci": "3ds",
+            ".n64": "n64", ".z64": "n64", ".v64": "n64",
+            ".gcm": "gc", ".gcz": "gc", ".rvz": "gc",
+            ".wbfs": "wii", ".wad": "wii",
+            ".nsp": "switch", ".xci": "switch",
+            ".md": "genesis", ".smd": "genesis", ".gen": "genesis",
+            ".gg": "gamegear", ".sms": "mastersystem",
+            ".32x": "sega32x",
+            ".a26": "atari2600", ".a78": "atari7800",
+            ".lnx": "atarilynx", ".lyx": "atarilynx",
+            ".jag": "atarijaguar", ".j64": "atarijaguar",
+            ".pce": "pcengine",
+            ".ngp": "neogeopocket", ".ngc": "neogeopocket",
+            ".ws": "wonderswan", ".wsc": "wonderswan",
+            ".col": "colecovision",
+        }
+
+        # Strategy 1: extension matching + special file detection
+        # Parse busybox unzip -l format:
+        #   "  1234  10-25-2024 21:22   filename with spaces.ext"
+        line_re = re.compile(r"^\s*(\d+)\s+\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}\s{3}(.+)$")
+        disc_image_name = None
+        disc_image_size = 0
+        for line in result.stdout.splitlines():
+            m = line_re.match(line)
+            if not m:
+                continue
+            file_size_str, candidate = m.group(1), m.group(2)
+            candidate = candidate.strip()
+
+            if candidate == "PS3_DISC.SFB":
+                return "ps3"
+
+            if candidate.endswith("/") or not candidate:
+                continue
+
+            inner_ext = Path(candidate).suffix.lower()
+            system = ext_map.get(inner_ext)
+            if system:
+                return system
+
+            # Track .iso/.ciso files for Strategy 2
+            if inner_ext in (".iso", ".ciso"):
+                disc_image_name = candidate
+                try:
+                    disc_image_size = int(file_size_str)
+                except ValueError:
+                    pass
+
+        # Strategy 2: extract disc header bytes from .iso/.ciso inside zip
+        if disc_image_name:
+            inner_ext = Path(disc_image_name).suffix.lower()
+            # For .ciso: need enough data for CISO header + first block (at 0x8000+)
+            # For .iso: need first 128KB (sector 0 + sector 16 PVD + root dir)
+            extract_size = 0x20000 if inner_ext == ".ciso" else 0x20000
+            try:
+                extract_result = subprocess.run(
+                    ["ssh", "-n", f"{NAS_USER}@{NAS_HOST}",
+                     f"busybox unzip -p \"{remote_path}\" \"{disc_image_name}\""
+                     f" 2>/dev/null | head -c {extract_size}"],
+                    capture_output=True, timeout=30,
+                )
+                raw_data = extract_result.stdout
+                if raw_data and len(raw_data) > 256:
+                    if inner_ext == ".ciso":
+                        disc_data = _decompress_ciso_header(raw_data)
+                    else:
+                        disc_data = raw_data
+
+                    if disc_data:
+                        system = _system_from_header_bytes(disc_data)
+                        if system:
+                            # Size-based PS2 override: disc images > 1GB
+                            # can't be PSX (CD-only, max ~700MB)
+                            if system == "psx" and disc_image_size > 1_000_000_000:
+                                return "ps2"
+                            return system
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+
+    return None
 
 
 def classify_header(filename, use_nas, local_dir=None):
     """Classify a file by reading its binary header (Layer 3).
 
-    Returns (system, "header") or (None, None).
+    For NAS: reads headers via SSH for CHD/ISO/BIN/ZIP files.
+    For local: reads headers directly from disk.
+    Also peeks inside remote archives for extension-based detection.
+
+    Returns (system, source_tag) or (None, None).
     """
     ext = Path(filename).suffix.lower()
-    if ext not in (".chd", ".iso", ".bin", ".img", ".cue",
-                   ".nes", ".smc", ".sfc", ".n64", ".z64", ".v64",
-                   ".md", ".gen", ".32x"):
+    supported = (".chd", ".iso", ".bin", ".img", ".cue", ".zip",
+                 ".nes", ".smc", ".sfc", ".n64", ".z64", ".v64",
+                 ".md", ".gen", ".32x")
+    if ext not in supported:
         return None, None
 
     if use_nas:
+        # For zips: first try extension peek (fast), then header analysis (slower)
+        if ext == ".zip":
+            system = _peek_nas_archive_system(filename)
+            if system:
+                return system, "archive-peek"
+
+        # For CHDs: try track metadata classification first (works for CD CHDs
+        # where hunk decompression fails due to cdlz/cdzl/cdfl compressors)
+        if ext == ".chd":
+            system = _classify_chd_via_metadata(filename, use_nas=True)
+            if system:
+                return system, "chd-metadata"
+
         data = _read_nas_header(filename, use_nas=True)
     elif local_dir:
         filepath = Path(local_dir) / filename
         if not filepath.exists():
             return None, None
-        is_chd = ext == ".chd"
-        if is_chd:
+        if ext == ".chd":
             data = _read_chd_sector_data(filepath)
-        else:
+        elif ext in (".iso", ".bin", ".img"):
             try:
                 with open(filepath, "rb") as f:
                     data = f.read(0x20000)
             except OSError:
                 return None, None
+        else:
+            return None, None
     else:
         return None, None
 
@@ -849,7 +1139,7 @@ def main():
         for system in sorted(by_system):
             print(f"\n  {system}/")
             for filename, source in sorted(by_system[system]):
-                tag = f" [{source}]" if source in ("igdb", "header") else ""
+                tag = f" [{source}]" if source in ("igdb", "header", "archive-peek") else ""
                 print(f"    {filename}{tag}")
     else:
         print("No files could be classified.")
