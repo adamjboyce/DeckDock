@@ -61,7 +61,9 @@ patch_launchers() {
         patched=$((patched + 1))
     done
 
-    [ "$patched" -gt 0 ] && echo "Patched $patched launcher(s) with NAS hook."
+    if [ "$patched" -gt 0 ]; then
+        echo "Patched $patched launcher(s) with NAS hook."
+    fi
 }
 
 patch_launchers
