@@ -217,6 +217,11 @@ done
 
 echo "Sync complete: $sync_count new symlinks, $clean_count stale removed."
 
+# --- Fetch artwork for new games in background ---
+if [ "$sync_count" -gt 0 ]; then
+    ( python3 "$HOME/Emulation/tools/fetch-boxart.py" >/dev/null 2>&1 ) &
+fi
+
 # --- Generate ES-DE custom_systems XML ---
 if [ "$GENERATE_XML" = true ]; then
     mkdir -p "$ESDE_CUSTOM_DIR"
