@@ -100,7 +100,7 @@ sort_file() {
         a52)                    dest="atari5200" ;;
         a78)                    dest="atari7800" ;;
         lnx)                    dest="lynx" ;;
-        j64)                    dest="jaguar" ;;
+        j64)                    dest="atarijaguar" ;;
 
         # --- Other ---
         pce)                    dest="pcengine" ;;

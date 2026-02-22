@@ -337,6 +337,7 @@ ROM_SYSTEMS=(
     nes snes gb gbc gba nds 3ds n64 gc wii switch
     psx ps2 psp dreamcast saturn segacd
     genesis gamegear mastersystem sega32x
+    atarijaguar 3do cdi
     atari2600 atari5200 atari7800 pcengine
     ngp wonderswan mame scummvm
 )

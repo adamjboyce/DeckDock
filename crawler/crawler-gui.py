@@ -10,14 +10,17 @@ or from the path specified in the DECKDOCK_CONFIG environment variable.
 import hashlib
 import http.server
 import json
+import lzma
 import os
 import re
+import struct
 import subprocess
 import sys
 import threading
 import time
 import urllib.parse
 import zipfile
+import zlib
 from pathlib import Path
 
 import requests
@@ -174,6 +177,528 @@ NAS_ROM_SUBDIR = cfg("NAS_ROM_SUBDIR", "roms")
 # Trickle push from config
 TRICKLE_PUSH = cfg("TRICKLE_PUSH", "false").lower() == "true"
 
+# IGDB API config (optional — for auto-classifying unknown game titles)
+IGDB_CLIENT_ID = cfg("IGDB_CLIENT_ID", "")
+IGDB_CLIENT_SECRET = cfg("IGDB_CLIENT_SECRET", "")
+
+
+# ============================================================================
+# TITLE-BASED CLASSIFICATION (Layer 1: curated JSON, Layer 2: IGDB API)
+# ============================================================================
+
+# IGDB platform ID -> our system slug (disc-based systems only)
+_IGDB_PLATFORM_MAP = {
+    7: "psx",          # PlayStation
+    8: "ps2",          # PlayStation 2
+    21: "gc",           # GameCube
+    29: "genesis",      # Genesis / Mega Drive
+    32: "saturn",       # Sega Saturn
+    23: "dreamcast",    # Dreamcast
+    78: "segacd",       # Sega CD
+    50: "3do",          # 3DO
+    117: "cdi",         # CD-i
+    62: "atarijaguar",  # Atari Jaguar
+    61: "atarilynx",   # Atari Lynx (for disambiguation)
+    11: "xbox",        # Xbox (for disambiguation)
+    18: "nes",          # NES
+    19: "snes",         # SNES
+    4: "n64",           # Nintendo 64
+    5: "wii",           # Wii
+    38: "psp",          # PSP
+    52: "arcade",       # Arcade
+    86: "pcengine",     # PC Engine / TurboGrafx-16
+}
+
+# All system slugs we support (used for IGDB disambiguation — if a game
+# matches multiple of these, it's ambiguous and we skip it)
+_MAPPED_SYSTEMS = set(_IGDB_PLATFORM_MAP.values())
+
+_TITLE_DB_PATH = Path(__file__).resolve().parent / "title-systems.json"
+
+# In-memory IGDB OAuth token cache
+_igdb_token = None
+_igdb_token_expires = 0
+
+
+def _load_title_database():
+    """Load the curated title-to-system JSON database.
+
+    Returns a list of (pattern, system) tuples sorted by pattern length
+    descending (longest/most-specific match wins).
+    """
+    if not _TITLE_DB_PATH.exists():
+        return []
+
+    try:
+        with open(_TITLE_DB_PATH, "r") as f:
+            db = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"WARNING: Failed to load title database: {e}")
+        return []
+
+    pairs = []
+    for system, titles in db.items():
+        if system.startswith("_"):
+            continue  # skip metadata keys
+        if not isinstance(titles, list):
+            continue
+        for title in titles:
+            pairs.append((title.lower(), system))
+
+    # Sort by pattern length descending — longest match wins
+    pairs.sort(key=lambda p: len(p[0]), reverse=True)
+    return pairs
+
+
+def _load_no_match_cache():
+    """Load the _no_match list from the title database."""
+    if not _TITLE_DB_PATH.exists():
+        return set()
+    try:
+        with open(_TITLE_DB_PATH, "r") as f:
+            db = json.load(f)
+        return set(db.get("_no_match", []))
+    except (json.JSONDecodeError, OSError):
+        return set()
+
+
+def _save_title_to_database(title_lower, system):
+    """Append a new title mapping to the curated JSON database."""
+    try:
+        with open(_TITLE_DB_PATH, "r") as f:
+            db = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        db = {"_format": "title-systems-v1"}
+
+    if system not in db:
+        db[system] = []
+    if title_lower not in db[system]:
+        db[system].append(title_lower)
+
+    with open(_TITLE_DB_PATH, "w") as f:
+        json.dump(db, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+
+def _save_no_match(title_lower):
+    """Add a title to the _no_match cache so we don't re-query IGDB."""
+    try:
+        with open(_TITLE_DB_PATH, "r") as f:
+            db = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        db = {"_format": "title-systems-v1"}
+
+    if "_no_match" not in db:
+        db["_no_match"] = []
+    if title_lower not in db["_no_match"]:
+        db["_no_match"].append(title_lower)
+
+    with open(_TITLE_DB_PATH, "w") as f:
+        json.dump(db, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+
+def _igdb_authenticate():
+    """Get an IGDB API token via Twitch OAuth2 client credentials flow."""
+    global _igdb_token, _igdb_token_expires
+
+    if _igdb_token and time.time() < _igdb_token_expires:
+        return _igdb_token
+
+    if not IGDB_CLIENT_ID or not IGDB_CLIENT_SECRET:
+        return None
+
+    try:
+        resp = requests.post("https://id.twitch.tv/oauth2/token", data={
+            "client_id": IGDB_CLIENT_ID,
+            "client_secret": IGDB_CLIENT_SECRET,
+            "grant_type": "client_credentials",
+        }, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        _igdb_token = data["access_token"]
+        _igdb_token_expires = time.time() + data.get("expires_in", 3600) - 60
+        return _igdb_token
+    except Exception as e:
+        print(f"IGDB auth failed: {e}")
+        return None
+
+
+def _igdb_lookup(title):
+    """Query IGDB for a game title and return the system slug, or None.
+
+    Returns None if:
+    - IGDB credentials not configured
+    - API error
+    - No results
+    - Multiple disc-based systems match (ambiguous)
+    """
+    token = _igdb_authenticate()
+    if not token:
+        return None
+
+    # Rate limit: 0.3s between calls
+    time.sleep(0.3)
+
+    try:
+        resp = requests.post(
+            "https://api.igdb.com/v4/games",
+            headers={
+                "Client-ID": IGDB_CLIENT_ID,
+                "Authorization": f"Bearer {token}",
+            },
+            data=f'search "{title}"; fields name,platforms; limit 5;',
+            timeout=10,
+        )
+        resp.raise_for_status()
+        results = resp.json()
+    except Exception as e:
+        print(f"IGDB lookup failed for '{title}': {e}")
+        return None
+
+    if not results:
+        return None
+
+    # Collect all matching disc-based systems across results
+    matched_systems = set()
+    for game in results:
+        platforms = game.get("platforms", [])
+        for pid in platforms:
+            slug = _IGDB_PLATFORM_MAP.get(pid)
+            if slug:
+                matched_systems.add(slug)
+
+    if len(matched_systems) == 1:
+        return matched_systems.pop()
+
+    # Multiple disc systems or none — ambiguous, skip
+    return None
+
+
+# Load the title database at module level
+TITLE_DATABASE = _load_title_database()
+_NO_MATCH_CACHE = _load_no_match_cache()
+
+
+# ============================================================================
+# BINARY HEADER ANALYSIS (Layer 3: magic byte identification)
+# ============================================================================
+
+
+def _read_system_cnf(data):
+    """Parse ISO 9660 root directory to find and read SYSTEM.CNF.
+
+    PSX discs contain "BOOT = cdrom:\\SLUS_123.45;1"
+    PS2 discs contain "BOOT2 = cdrom0:\\SLUS_123.45;1"
+
+    Args:
+        data: Raw disc data (needs at least ~128KB to reach root dir + file data)
+    Returns:
+        Contents of SYSTEM.CNF as string, or None if not found.
+    """
+    pvd_offset = 0x8000
+    if len(data) < pvd_offset + 0x100:
+        return None
+
+    pvd = data[pvd_offset:]
+    if pvd[0:1] != b"\x01" or pvd[1:6] != b"CD001":
+        return None
+
+    root_record = pvd[0x9C:0x9C + 34]
+    if len(root_record) < 34:
+        return None
+
+    root_lba = struct.unpack("<I", root_record[2:6])[0]
+    root_len = struct.unpack("<I", root_record[10:14])[0]
+
+    root_offset = root_lba * 2048
+    if root_offset + root_len > len(data):
+        return None
+
+    root_dir = data[root_offset:root_offset + root_len]
+
+    pos = 0
+    while pos < len(root_dir):
+        entry_len = root_dir[pos]
+        if entry_len == 0:
+            next_sector = ((pos // 2048) + 1) * 2048
+            if next_sector >= len(root_dir):
+                break
+            pos = next_sector
+            continue
+
+        if pos + entry_len > len(root_dir):
+            break
+
+        entry = root_dir[pos:pos + entry_len]
+        if len(entry) < 34:
+            pos += entry_len
+            continue
+
+        id_len = entry[32]
+        if id_len > 0 and pos + 33 + id_len <= pos + entry_len:
+            file_id = entry[33:33 + id_len].decode("ascii", errors="ignore")
+            file_name = file_id.split(";")[0].strip()
+
+            if file_name.upper() == "SYSTEM.CNF":
+                file_lba = struct.unpack("<I", entry[2:6])[0]
+                file_len = struct.unpack("<I", entry[10:14])[0]
+                file_offset = file_lba * 2048
+
+                if file_offset + file_len > len(data):
+                    return None
+
+                return data[file_offset:file_offset + file_len].decode(
+                    "ascii", errors="ignore"
+                )
+
+        pos += entry_len
+
+    return None
+
+
+def _playstation_version(data):
+    """Distinguish PSX from PS2 using SYSTEM.CNF contents.
+
+    Returns "ps2" or "psx". Falls back to PVD heuristics if SYSTEM.CNF
+    can't be read.
+    """
+    system_cnf = _read_system_cnf(data)
+    if system_cnf:
+        if "BOOT2" in system_cnf:
+            return "ps2"
+        if "BOOT" in system_cnf:
+            return "psx"
+
+    # Fallback: PVD field heuristics
+    pvd = data[0x8000:]
+    system_id = pvd[8:40].decode("ascii", errors="ignore").strip()
+    if "2" in system_id:
+        return "ps2"
+
+    publisher = pvd[0x8E:0x8E + 128].decode("ascii", errors="ignore").strip()
+    if "2" in publisher and "PLAYSTATION" in publisher.upper():
+        return "ps2"
+
+    return "psx"
+
+
+def _system_from_header_bytes(data):
+    """Identify system from raw disc/ROM header bytes.
+
+    Args:
+        data: At least first 128KB of disc image data (raw, not CHD-wrapped).
+              Covers sector 0, sector 16 PVD, root directory, and SYSTEM.CNF.
+    Returns:
+        System slug or None.
+    """
+    if len(data) < 16:
+        return None
+
+    # --- Cartridge ROMs ---
+    if data[:4] == b"NES\x1a":
+        return "nes"
+
+    if len(data) >= 4:
+        n64_magic = struct.unpack(">I", data[0:4])[0]
+        if n64_magic in (0x80371240, 0x37804012, 0x40123780):
+            return "n64"
+
+    if len(data) >= 0x120 and data[0x100:0x104] == b"SEGA":
+        header_text = data[0x100:0x120]
+        if b"GENESIS" in header_text or b"MEGA DRIVE" in header_text:
+            return "genesis"
+
+    if len(data) >= 0x20:
+        gc_magic = struct.unpack(">I", data[0x1C:0x20])[0]
+        if gc_magic == 0xC2339F3D:
+            return "gc"
+
+    if len(data) >= 0x1C:
+        wii_magic = struct.unpack(">I", data[0x18:0x1C])[0]
+        if wii_magic == 0x5D1C9EA3:
+            return "wii"
+
+    # --- Disc-based systems: sector 0 ---
+    if data[:15] == b"SEGA SEGASATURN":
+        return "saturn"
+
+    if data[:14] == b"SEGADISCSYSTEM" or data[:15] == b"SEGA DISCSYSTEM":
+        return "segacd"
+
+    if data[:15] == b"SEGA SEGAKATANA":
+        return "dreamcast"
+    if len(data) >= 11 and data[:11] == b"SEGA SEGADC":
+        return "dreamcast"
+
+    if len(data) >= 0x2E:
+        if data[0:4] == b"\x01\x00\x00\x00" and data[0x28:0x2E] == b"CD-ROM":
+            return "3do"
+
+    # --- Sector 16 (0x8000) — ISO 9660 Primary Volume Descriptor ---
+    pvd_offset = 0x8000
+    if len(data) > pvd_offset + 0x240:
+        pvd = data[pvd_offset:]
+
+        if pvd[0:1] == b"\x01" and pvd[1:6] == b"CD001":
+            system_id = pvd[8:40].decode("ascii", errors="ignore").strip()
+
+            if "PLAYSTATION" in system_id:
+                return _playstation_version(data)
+
+        if pvd[0:1] == b"\xff":
+            return "cdi"
+
+    # PC Engine CD
+    if len(data) >= 0x100:
+        if b"PC Engine" in data[:0x100] or b"PC-ENGINE" in data[:0x100]:
+            return "pcengine"
+
+    return None
+
+
+def _parse_chd_header(chd_header_bytes):
+    """Parse a CHD v5 file header. Returns info dict or None."""
+    if len(chd_header_bytes) < 124 or chd_header_bytes[:8] != b"MComprHD":
+        return None
+
+    version = struct.unpack(">I", chd_header_bytes[12:16])[0]
+    if version != 5:
+        return None
+
+    compressors = []
+    for i in range(4):
+        c = chd_header_bytes[16 + i * 4:20 + i * 4]
+        if c != b"\x00\x00\x00\x00":
+            compressors.append(c)
+
+    logical_bytes = struct.unpack(">Q", chd_header_bytes[32:40])[0]
+    map_offset = struct.unpack(">Q", chd_header_bytes[40:48])[0]
+    hunk_bytes = struct.unpack(">I", chd_header_bytes[56:60])[0]
+
+    hunk_count = (logical_bytes + hunk_bytes - 1) // hunk_bytes if hunk_bytes else 0
+
+    return {
+        "version": 5,
+        "hunk_bytes": hunk_bytes,
+        "hunk_count": hunk_count,
+        "map_offset": map_offset,
+        "compressors": compressors,
+        "logical_bytes": logical_bytes,
+    }
+
+
+def _decompress_chd_hunk(data, offset, length, compressor):
+    """Decompress a single CHD hunk. Returns bytes or None."""
+    compressed = data[offset:offset + length]
+    if not compressed:
+        return None
+
+    tag = compressor.decode("ascii", errors="ignore").strip("\x00")
+
+    try:
+        if tag in ("zlib", "cdzl"):
+            return zlib.decompress(compressed, -15)
+        elif tag in ("lzma", "cdlz"):
+            return lzma.decompress(compressed)
+        elif tag == "none":
+            return compressed
+    except Exception:
+        pass
+
+    # Fallback: try raw inflate and standard zlib
+    for wbits in (-15, 15):
+        try:
+            return zlib.decompress(compressed, wbits)
+        except Exception:
+            pass
+    return None
+
+
+def _read_chd_sector_data(filepath, max_read=512 * 1024):
+    """Extract first ~64KB of disc data from a CHD file.
+
+    Reads the CHD header, parses the hunk map, and decompresses the first
+    few hunks to get sector 0 + sector 16 of the actual disc.
+    """
+    try:
+        with open(filepath, "rb") as f:
+            raw = f.read(max_read)
+    except OSError:
+        return None
+
+    info = _parse_chd_header(raw)
+    if not info:
+        return None
+
+    hunk_bytes = info["hunk_bytes"]
+    map_offset = info["map_offset"]
+    hunk_count = info["hunk_count"]
+    compressors = info["compressors"]
+
+    if not hunk_bytes or not compressors:
+        return None
+
+    needed_bytes = 0x20000  # 128KB: sector 16 PVD + root dir + SYSTEM.CNF
+    map_entry_size = 12
+    result = bytearray()
+    hunks_needed = (needed_bytes + hunk_bytes - 1) // hunk_bytes
+
+    for hunk_idx in range(min(hunks_needed, hunk_count)):
+        entry_offset = map_offset + hunk_idx * map_entry_size
+        if entry_offset + map_entry_size > len(raw):
+            break
+
+        entry = raw[entry_offset:entry_offset + map_entry_size]
+        comp_type = entry[0]
+        comp_length = (entry[1] << 16) | (entry[2] << 8) | entry[3]
+        hunk_offset = struct.unpack(">Q", b"\x00\x00" + entry[4:10])[0]
+
+        if hunk_offset + comp_length > len(raw):
+            break
+
+        if comp_type == 4:  # uncompressed
+            result.extend(raw[hunk_offset:hunk_offset + hunk_bytes])
+        elif comp_type == 5:  # self-ref
+            break
+        elif comp_type < len(compressors):
+            decompressed = _decompress_chd_hunk(raw, hunk_offset, comp_length, compressors[comp_type])
+            if decompressed:
+                result.extend(decompressed)
+            else:
+                break
+        else:
+            break
+
+        if len(result) >= needed_bytes:
+            break
+
+    return bytes(result) if len(result) >= 16 else None
+
+
+def _system_from_file_header(filepath):
+    """Read binary headers from a local file and return system slug or None.
+
+    Handles both CHD containers and raw disc images (.iso, .bin, .img).
+    """
+    ext = filepath.suffix.lower()
+
+    if ext == ".chd":
+        data = _read_chd_sector_data(filepath)
+    elif ext in (".iso", ".bin", ".img"):
+        try:
+            with open(filepath, "rb") as f:
+                data = f.read(0x20000)
+        except OSError:
+            return None
+    else:
+        return None
+
+    if not data:
+        return None
+
+    return _system_from_header_bytes(data)
+
 
 # ============================================================================
 # CRAWLER ENGINE
@@ -295,6 +820,9 @@ SYSTEM_CHOICES = [
     ("atari2600", "Atari 2600"),
     ("atari7800", "Atari 7800"),
     ("atarilynx", "Atari Lynx"),
+    ("atarijaguar", "Atari Jaguar"),
+    ("3do", "3DO"),
+    ("cdi", "Philips CD-i"),
     ("xbox", "Xbox"),
     ("scummvm", "ScummVM"),
     ("other", "Other / Unsorted"),
@@ -519,6 +1047,52 @@ class CrawlJob:
                 return system
         return None
 
+    def _system_from_title(self, filename):
+        """Try to classify a file by matching its title against the curated
+        title database (Layer 1) and optionally the IGDB API (Layer 2).
+
+        Returns a system slug or None if no confident match.
+        """
+        global TITLE_DATABASE
+        # Strip extension and region tags to get a clean title
+        stem = Path(filename).stem
+        # Remove region/revision tags: (USA), (Europe), (Disc 1), (Rev 2), (v2.01), (En,Ja,...), (T-En)
+        clean = re.sub(r'\s*\([^)]*\)', '', stem).strip()
+        title_lower = clean.lower()
+
+        if not title_lower:
+            return None
+
+        # Layer 1: Curated database (fast, offline)
+        for pattern, system in TITLE_DATABASE:
+            if pattern in title_lower:
+                self._log(f"  Title match: '{clean}' -> {system} (curated)")
+                return system
+
+        # Layer 2: IGDB API fallback (if configured)
+        if not IGDB_CLIENT_ID or not IGDB_CLIENT_SECRET:
+            return None
+
+        # Check no-match cache to avoid re-querying
+        if title_lower in _NO_MATCH_CACHE:
+            return None
+
+        self._log(f"  IGDB lookup: '{clean}'...")
+        system = _igdb_lookup(clean)
+
+        if system:
+            self._log(f"  IGDB match: '{clean}' -> {system}")
+            # Cache the result in the curated database for future runs
+            _save_title_to_database(title_lower, system)
+            # Reload the in-memory database
+            TITLE_DATABASE = _load_title_database()
+            return system
+        else:
+            self._log(f"  IGDB: no confident match for '{clean}'")
+            _save_no_match(title_lower)
+            _NO_MATCH_CACHE.add(title_lower)
+            return None
+
     def _get_system_for_file(self, filename, url=None):
         """Determine which system folder a file belongs in."""
         if self.system != "auto":
@@ -556,6 +1130,12 @@ class CrawlJob:
                 return "wii"
             elif "xbox" in fname_lower:
                 return "xbox"
+
+        # 3.5. Title-based classification (curated database + IGDB fallback)
+        if ext in (".zip", ".7z", ".rar", ".chd", ".iso"):
+            system = self._system_from_title(filename)
+            if system:
+                return system
 
         # 4. Archives with no other clues -> "other" (may be reclassified after download)
         if ext in (".zip", ".7z", ".rar", ".gz", ".bz2", ".xz", ".tar"):
@@ -598,15 +1178,27 @@ class CrawlJob:
         return None
 
     def _reclassify_archive(self, filepath, url):
-        """After downloading an archive, peek inside to reclassify if it landed in 'other'."""
+        """After downloading, reclassify if the file landed in 'other'.
+
+        Tries two strategies:
+        1. Archive peek: look inside .zip/.7z/.rar for known ROM extensions
+        2. Header analysis: read binary headers from .chd/.iso/.bin files
+        """
         if filepath.parent.name != "other":
             return filepath  # Already classified
 
         ext = filepath.suffix.lower()
-        if ext not in (".zip", ".7z", ".rar"):
-            return filepath  # Not a peekable archive
+        new_system = None
 
-        new_system = self._peek_archive_system(filepath)
+        # Strategy 1: peek inside archives
+        if ext in (".zip", ".7z", ".rar"):
+            new_system = self._peek_archive_system(filepath)
+
+        # Strategy 2: binary header analysis for disc images
+        if not new_system and ext in (".chd", ".iso", ".bin", ".img"):
+            new_system = _system_from_file_header(filepath)
+            if new_system:
+                self._log(f"  Header analysis: {filepath.name} -> {new_system}")
 
         if not new_system:
             return filepath  # Can't determine, leave in "other"
@@ -617,13 +1209,195 @@ class CrawlJob:
         new_path = new_dir / filepath.name
 
         if new_path.exists():
-            # Already exists in target — don't overwrite
             self._log(f"  Reclassify: {filepath.name} -> {new_system}/ (already exists, kept in other/)")
             return filepath
 
+        source = "header" if ext in (".chd", ".iso", ".bin", ".img") else "archive contents"
         filepath.rename(new_path)
-        self._log(f"  Reclassify: {filepath.name} -> {new_system}/ (detected from archive contents)")
+        self._log(f"  Reclassify: {filepath.name} -> {new_system}/ (detected from {source})")
         return new_path
+
+    # ------------------------------------------------------------------
+    # Multi-disc detection + .m3u generation
+    # ------------------------------------------------------------------
+
+    _DISC_RE = re.compile(r"^(.+?)\s*\(Disc\s*(\d+)\)", re.IGNORECASE)
+
+    def _check_multi_disc(self, filepath):
+        """After downloading a Disc 1 file, look for sibling discs and generate .m3u.
+
+        Only triggers on files matching (Disc 1) pattern. Searches discovered_files
+        for matching sibling disc URLs, and tries URL manipulation as fallback.
+        After all discs are accounted for, generates the .m3u playlist.
+        """
+        stem = filepath.stem
+        m = self._DISC_RE.match(stem)
+        if not m:
+            return  # Not a disc-numbered file
+
+        disc_num = int(m.group(2))
+        if disc_num != 1:
+            return  # Only trigger on Disc 1
+
+        base_name = m.group(1).strip()
+        system_dir = filepath.parent
+        ext = filepath.suffix  # e.g., ".chd"
+
+        self._log(f"  Multi-disc: detected Disc 1 for '{base_name}'")
+
+        # Find existing disc files in the same system directory
+        existing_discs = {}
+        if system_dir.exists():
+            for f in system_dir.iterdir():
+                if not f.is_file():
+                    continue
+                dm = self._DISC_RE.match(f.stem)
+                if dm and dm.group(1).strip().lower() == base_name.lower() and f.suffix.lower() == ext.lower():
+                    existing_discs[int(dm.group(2))] = f.name
+
+        # Check discovered_files for sibling disc URLs not yet downloaded
+        sibling_urls = []
+        base_lower = base_name.lower()
+        for url in self.discovered_files:
+            if url in self.downloaded_files:
+                continue
+            # Extract filename from URL
+            url_path = urllib.parse.urlparse(url).path
+            url_fname = urllib.parse.unquote(url_path.split("/")[-1])
+            dm = self._DISC_RE.match(Path(url_fname).stem)
+            if dm and dm.group(1).strip().lower() == base_lower and int(dm.group(2)) != 1:
+                sibling_urls.append((int(dm.group(2)), url))
+
+        # Try URL manipulation as fallback for discs 2-4
+        if not sibling_urls:
+            # Find the URL that produced this Disc 1 file
+            disc1_url = None
+            for url in self.downloaded_files:
+                url_path = urllib.parse.urlparse(url).path
+                url_fname = urllib.parse.unquote(url_path.split("/")[-1])
+                if url_fname == filepath.name or base_lower in url_fname.lower():
+                    disc1_url = url
+                    break
+
+            if disc1_url:
+                for disc_n in range(2, 5):
+                    if disc_n in existing_discs:
+                        continue
+                    # Try common URL patterns for disc numbering
+                    for old, new in [
+                        (f"Disc 1", f"Disc {disc_n}"),
+                        (f"Disc_1", f"Disc_{disc_n}"),
+                        (f"disc1", f"disc{disc_n}"),
+                        (f"disc_1", f"disc_{disc_n}"),
+                        (f"(Disc 1)", f"(Disc {disc_n})"),
+                        (f"(Disc%201)", f"(Disc%20{disc_n})"),
+                    ]:
+                        if old in disc1_url:
+                            test_url = disc1_url.replace(old, new)
+                            if test_url != disc1_url:
+                                sibling_urls.append((disc_n, test_url))
+                                break
+
+        # Download any discovered sibling discs
+        for disc_n, url in sorted(sibling_urls):
+            if disc_n in existing_discs:
+                continue
+            self._log(f"  Multi-disc: downloading Disc {disc_n}...")
+            success = self.download_file(url)
+            if success:
+                # Re-scan directory for the new file
+                for f in system_dir.iterdir():
+                    dm = self._DISC_RE.match(f.stem)
+                    if dm and dm.group(1).strip().lower() == base_lower and int(dm.group(2)) == disc_n:
+                        existing_discs[disc_n] = f.name
+                        break
+
+        # Re-scan to get final disc inventory
+        existing_discs = {}
+        if system_dir.exists():
+            for f in system_dir.iterdir():
+                if not f.is_file():
+                    continue
+                dm = self._DISC_RE.match(f.stem)
+                if dm and dm.group(1).strip().lower() == base_lower and f.suffix.lower() == ext.lower():
+                    existing_discs[int(dm.group(2))] = f.name
+
+        if len(existing_discs) > 1:
+            self._generate_m3u(system_dir, base_name, existing_discs)
+
+    def _generate_m3u(self, system_dir, base_name, disc_map):
+        """Generate a .m3u playlist file for a multi-disc game.
+
+        Args:
+            system_dir: Directory containing the disc files
+            base_name: Game title without disc number (e.g., "Final Fantasy VII (USA)")
+            disc_map: Dict of {disc_number: filename}
+        """
+        # Check for completeness (no gaps in disc numbers)
+        max_disc = max(disc_map.keys())
+        missing = [n for n in range(1, max_disc + 1) if n not in disc_map]
+        if missing:
+            self._log(f"  M3U: incomplete set for '{base_name}' — missing disc(s) {missing}")
+            return
+
+        m3u_name = f"{base_name}.m3u"
+        m3u_path = system_dir / m3u_name
+
+        if m3u_path.exists():
+            self._log(f"  M3U: {m3u_name} already exists")
+            return
+
+        # Write playlist — one filename per line, sorted by disc number
+        lines = [disc_map[n] for n in sorted(disc_map.keys())]
+        m3u_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self._log(f"  M3U: created {m3u_name} ({len(lines)} discs)")
+
+        # Trickle push the .m3u file to NAS
+        self._trickle_push(m3u_path)
+
+    def _sweep_m3u(self):
+        """Post-crawl sweep: scan all system dirs in staging for multi-disc games
+        that need .m3u playlists. Catches anything _check_multi_disc missed
+        (e.g., discs downloaded in separate crawl sessions).
+        """
+        if not self.output_dir.exists():
+            return
+
+        disc_re = self._DISC_RE
+        m3u_count = 0
+
+        for system_dir in self.output_dir.iterdir():
+            if not system_dir.is_dir():
+                continue
+
+            # Group disc files by base name
+            games = {}
+            existing_m3u = set()
+            for f in system_dir.iterdir():
+                if not f.is_file():
+                    continue
+                if f.suffix.lower() == ".m3u":
+                    existing_m3u.add(f.stem.lower())
+                    continue
+                m = disc_re.match(f.stem)
+                if m:
+                    base = m.group(1).strip()
+                    disc_num = int(m.group(2))
+                    if base not in games:
+                        games[base] = {}
+                    games[base][disc_num] = f.name
+
+            # Generate .m3u for any complete sets without one
+            for base_name, disc_map in games.items():
+                if base_name.lower() in existing_m3u:
+                    continue
+                if len(disc_map) < 2:
+                    continue
+                self._generate_m3u(system_dir, base_name, disc_map)
+                m3u_count += 1
+
+        if m3u_count:
+            self._log(f"M3U sweep: generated {m3u_count} playlist(s)")
 
     def _post_process(self, filepath):
         """Recompress downloaded file to optimal format.
@@ -1516,6 +2290,9 @@ class CrawlJob:
             # Trickle push: send to NAS immediately if enabled
             self._trickle_push(filepath)
 
+            # Multi-disc: if this is Disc 1, look for sibling discs + generate .m3u
+            self._check_multi_disc(filepath)
+
             # Register in dedup registry with hash
             # (even if trickle-push deleted the local copy, we still record it)
             self.file_registry[registry_key] = {
@@ -1601,6 +2378,9 @@ class CrawlJob:
 
                 if i < len(remaining) and not self.stop_requested:
                     time.sleep(self.delay)
+
+        # Post-crawl: sweep local staging for any multi-disc games needing .m3u
+        self._sweep_m3u()
 
         self.status = "complete"
         self.phase = "All downloads complete"
@@ -1874,6 +2654,38 @@ class GUIHandler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 log("[NAS] Can't reach NAS. Is it on?")
                 return
+
+            # Pre-push: generate .m3u playlists for any multi-disc sets in staging
+            disc_re = re.compile(r"^(.+?)\s*\(Disc\s*(\d+)\)", re.IGNORECASE)
+            for sdir in system_dirs:
+                games = {}
+                existing_m3u = set()
+                for f in sdir.iterdir():
+                    if not f.is_file():
+                        continue
+                    if f.suffix.lower() == ".m3u":
+                        existing_m3u.add(f.stem.lower())
+                        continue
+                    m = disc_re.match(f.stem)
+                    if m:
+                        base = m.group(1).strip()
+                        disc_num = int(m.group(2))
+                        games.setdefault(base, {})[disc_num] = f.name
+                for base_name, disc_map in games.items():
+                    if base_name.lower() in existing_m3u or len(disc_map) < 2:
+                        continue
+                    max_d = max(disc_map.keys())
+                    if any(n not in disc_map for n in range(1, max_d + 1)):
+                        continue  # Incomplete set
+                    m3u_path = sdir / f"{base_name}.m3u"
+                    lines = [disc_map[n] for n in sorted(disc_map.keys())]
+                    m3u_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                    log(f"[M3U] Created {sdir.name}/{base_name}.m3u ({len(lines)} discs)")
+
+            # Re-scan system dirs (m3u files may have been added)
+            system_dirs = [d for d in staging.iterdir()
+                          if d.is_dir() and d.name != ".crawler-state.json"
+                          and any(d.iterdir())]
 
             # Push each system directory via SCP
             total_files = 0
