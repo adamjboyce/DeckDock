@@ -1,0 +1,13 @@
+[Unit]
+Description=DeckDock — Mount NAS ROM library via SSHFS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+ExecStart=%h/Emulation/tools/nas-mount.sh mount
+ExecStop=%h/Emulation/tools/nas-mount.sh unmount
+RemainAfterExit=yes
+
+[Install]
+WantedBy=default.target

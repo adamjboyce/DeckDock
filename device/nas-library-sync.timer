@@ -1,0 +1,9 @@
+[Unit]
+Description=DeckDock — Sync NAS library every 5 minutes
+
+[Timer]
+OnBootSec=90
+OnUnitActiveSec=300
+
+[Install]
+WantedBy=timers.target

@@ -104,7 +104,6 @@ def cfg(key, default=None):
 
 # Compression tools
 CHDMAN_BIN = os.path.expanduser("~/.local/bin/chdman-wrapper")
-SEVENZ_BIN = "/usr/bin/7z"
 
 # Extensions that are already in optimal format — never reprocess
 OPTIMAL_EXTENSIONS = {".chd", ".rvz", ".cso", ".pbp"}
@@ -218,7 +217,7 @@ EXT_TO_SYSTEM = {
     ".vec": "vectrex", ".col": "coleco",
 }
 
-# Now compute cartridge extensions (ROM files that should be in .7z, not disc images)
+# Now compute cartridge extensions (ROM files that should be in .zip, not disc images)
 CARTRIDGE_EXTENSIONS = set(EXT_TO_SYSTEM.keys()) - DISC_IMAGE_EXTENSIONS
 
 # URL path keywords -> system slug (for detecting system from directory structure)
@@ -630,11 +629,14 @@ class CrawlJob:
         """Recompress downloaded file to optimal format.
 
         - Archives containing disc images (.bin/.cue, .iso, .gdi) -> extract -> CHD
-        - Archives containing cartridge ROMs -> extract -> repack as .7z ultra (LZMA2)
+        - Archives containing cartridge ROMs -> extract -> repack as .zip
         - Bare disc images -> convert to CHD
-        - Bare cartridge ROMs -> pack as .7z ultra
+        - Bare cartridge ROMs -> pack as .zip
         - Already optimal formats (.chd, .rvz, .cso, .pbp) -> skip
-        - .7z files already -> skip (assume good enough; avoid re-extract/repack churn)
+        - .zip files already -> skip (assume good enough; avoid re-extract/repack churn)
+
+        Note: We use .zip instead of .7z because RetroArch's built-in extractor
+        cannot handle LZMA2-compressed .7z archives.
 
         Returns the new filepath (may differ from input).
         """
@@ -645,19 +647,19 @@ class CrawlJob:
         if ext in OPTIMAL_EXTENSIONS:
             return filepath
 
-        # Already .7z — skip reprocessing (downloaded .7z is fine)
-        if ext == ".7z":
+        # Already .zip — skip reprocessing
+        if ext == ".zip":
             return filepath
 
         # --- Bare (non-archived) files ---
-        if ext not in (".zip", ".rar"):
+        if ext not in (".7z", ".rar"):
             if ext in DISC_IMAGE_EXTENSIONS:
                 return self._convert_to_chd(filepath)
             if ext in CARTRIDGE_EXTENSIONS:
-                return self._pack_to_7z(filepath)
+                return self._pack_to_zip(filepath)
             return filepath  # Unknown type, leave it
 
-        # --- Archives (.zip, .rar) — extract, identify, reprocess ---
+        # --- Archives (.7z, .rar) — extract, identify, reprocess ---
         return self._reprocess_archive(filepath)
 
     def _convert_to_chd(self, filepath):
@@ -713,44 +715,36 @@ class CrawlJob:
                 chd_path.unlink()
             return filepath
 
-    def _pack_to_7z(self, filepath):
-        """Pack a bare ROM file into .7z with LZMA2 ultra compression."""
-        sz_path = filepath.with_suffix(".7z")
+    def _pack_to_zip(self, filepath):
+        """Pack a bare ROM file into .zip (deflate compression)."""
+        zip_path = filepath.with_suffix(".zip")
 
-        if sz_path.exists():
-            self._log(f"  7z already exists: {sz_path.name}")
+        if zip_path.exists():
+            self._log(f"  zip already exists: {zip_path.name}")
             filepath.unlink()
-            return sz_path
+            return zip_path
 
-        self._log(f"  Packing to 7z: {filepath.name}")
+        self._log(f"  Packing to zip: {filepath.name}")
         try:
-            result = subprocess.run(
-                [SEVENZ_BIN, "a", "-t7z", "-m0=lzma2", "-mx=9", "-mfb=273", "-md=64m",
-                 str(sz_path), str(filepath)],
-                capture_output=True, text=True, timeout=300,
-            )
-            if result.returncode != 0:
-                self._log(f"  7z pack failed: {result.stderr[:120]}")
-                if sz_path.exists():
-                    sz_path.unlink()
-                return filepath
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+                zf.write(filepath, filepath.name)
 
             orig_size = filepath.stat().st_size
-            new_size = sz_path.stat().st_size
+            new_size = zip_path.stat().st_size
             savings = (1 - new_size / orig_size) * 100 if orig_size > 0 else 0
-            self._log(f"  7z done: {sz_path.name} ({savings:.0f}% smaller)")
+            self._log(f"  zip done: {zip_path.name} ({savings:.0f}% smaller)")
 
             filepath.unlink()
-            return sz_path
+            return zip_path
 
-        except (subprocess.TimeoutExpired, OSError) as e:
-            self._log(f"  7z pack error: {e}")
-            if sz_path.exists():
-                sz_path.unlink()
+        except (OSError, zipfile.BadZipFile) as e:
+            self._log(f"  zip pack error: {e}")
+            if zip_path.exists():
+                zip_path.unlink()
             return filepath
 
     def _reprocess_archive(self, filepath):
-        """Extract a .zip or .rar, convert/repack contents optimally, clean up."""
+        """Extract a .7z or .rar, convert/repack contents optimally, clean up."""
         ext = filepath.suffix.lower()
         stem = filepath.stem
         parent = filepath.parent
@@ -761,9 +755,9 @@ class CrawlJob:
 
             # Extract
             self._log(f"  Extracting {filepath.name}...")
-            if ext == ".zip":
-                with zipfile.ZipFile(filepath, "r") as zf:
-                    zf.extractall(tmp_dir)
+            if ext == ".7z":
+                with py7zr.SevenZipFile(filepath, "r") as sz:
+                    sz.extractall(tmp_dir)
             elif ext == ".rar":
                 with rarfile.RarFile(filepath, "r") as rf:
                     rf.extractall(tmp_dir)
@@ -809,31 +803,27 @@ class CrawlJob:
                             self._log(f"  CHD convert failed: {result.stderr[:120]}")
                     except (subprocess.TimeoutExpired, OSError) as e:
                         self._log(f"  CHD convert error: {e}")
-                    # Fallthrough — CHD failed, repack as 7z instead
+                    # Fallthrough — CHD failed, repack as zip instead
 
-            # Repack all extracted files as .7z ultra
-            sz_path = parent / (stem + ".7z")
-            self._log(f"  Repacking as 7z ultra...")
+            # Repack all extracted files as .zip (RetroArch can't handle .7z LZMA2)
+            zip_path = parent / (stem + ".zip")
+            self._log(f"  Repacking as zip...")
             try:
-                # Add all extracted files
-                file_args = [str(f) for f in extracted_files]
-                result = subprocess.run(
-                    [SEVENZ_BIN, "a", "-t7z", "-m0=lzma2", "-mx=9", "-mfb=273", "-md=64m",
-                     str(sz_path)] + file_args,
-                    capture_output=True, text=True, timeout=300,
-                )
-                if result.returncode == 0:
-                    orig_size = filepath.stat().st_size
-                    new_size = sz_path.stat().st_size
-                    savings = (1 - new_size / orig_size) * 100 if orig_size > 0 else 0
-                    self._log(f"  7z done: {sz_path.name} ({savings:.0f}% smaller)")
-                    filepath.unlink()
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
-                    return sz_path
-                else:
-                    self._log(f"  7z repack failed: {result.stderr[:120]}")
-            except (subprocess.TimeoutExpired, OSError) as e:
-                self._log(f"  7z repack error: {e}")
+                with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+                    for f in extracted_files:
+                        zf.write(f, f.name)
+
+                orig_size = filepath.stat().st_size
+                new_size = zip_path.stat().st_size
+                savings = (1 - new_size / orig_size) * 100 if orig_size > 0 else 0
+                self._log(f"  zip done: {zip_path.name} ({savings:.0f}% smaller)")
+                filepath.unlink()
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                return zip_path
+            except (OSError, zipfile.BadZipFile) as e:
+                self._log(f"  zip repack error: {e}")
+                if zip_path.exists():
+                    zip_path.unlink()
 
             # Cleanup on failure — keep original
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -970,9 +960,9 @@ class CrawlJob:
                 capture_output=True, text=True, timeout=10,
             )
 
-            # Rsync the single file
+            # Rsync the single file (--no-group avoids chgrp failures on NFS)
             result = subprocess.run(
-                ["rsync", "-az", "--ignore-existing",
+                ["rsync", "-az", "--no-group", "--ignore-existing",
                  str(filepath),
                  f"{DEVICE_HOST}:{target_dir}/"],
                 capture_output=True, text=True, timeout=300,
@@ -1272,7 +1262,9 @@ class CrawlJob:
         """Use Playwright to navigate to a page and click the Download button.
 
         Returns (filepath, filename) on success, or (None, None) on failure.
-        Uses aggressive Playwright-native timeouts (30s page load, 60s download).
+        Handles slow downloads (e.g., Vimm throttles to ~600 KB/s, so a 2GB
+        file takes ~55 min). The download itself has no timeout — only the
+        page navigation and button detection have timeouts.
         """
         if not HAS_PLAYWRIGHT:
             self._log("  Playwright not available for browser download")
@@ -1286,14 +1278,16 @@ class CrawlJob:
             context = self._browser.new_context(accept_downloads=True)
             context.set_extra_http_headers({
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                              "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+                              "AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
             })
             page = context.new_page()
+            # Only apply default timeout to navigation/element finding, not downloads
+            page.set_default_navigation_timeout(30000)
             page.set_default_timeout(30000)
 
             self._log(f"  Browser: navigating to {page_url}")
             page.goto(page_url, timeout=30000, wait_until="domcontentloaded")
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(3000)
 
             # Look for a download button/submit
             download_btn = None
@@ -1317,22 +1311,31 @@ class CrawlJob:
                 context.close()
                 return None, None
 
-            # 60s for download event — if bot protection blocks it, this times out
+            # 120s for download event to START (not finish) — covers slow
+            # server responses and redirect chains
             self._log("  Browser: clicking download button...")
-            with page.expect_download(timeout=60000) as dl_info:
+            with page.expect_download(timeout=120000) as dl_info:
                 download_btn.click()
 
             download = dl_info.value
             filename = download.suggested_filename
             save_path = os.path.join(dl_dir, filename)
-            fail = download.failure()
-            if fail:
-                self._log(f"  Browser: download failed — {fail}")
-                context.close()
-                return None, None
+
+            # save_as() waits for the download to complete — no timeout.
+            # For large files on throttled servers this can take 60+ minutes.
+            self._log(f"  Browser: downloading {filename}...")
             download.save_as(save_path)
 
-            self._log(f"  Browser: downloaded {filename}")
+            # Check if it actually succeeded (save_as raises on failure,
+            # but double-check the file exists and has content)
+            if not os.path.exists(save_path) or os.path.getsize(save_path) == 0:
+                fail = download.failure()
+                self._log(f"  Browser: download failed — {fail or 'empty file'}")
+                context.close()
+                return None, None
+
+            size_mb = os.path.getsize(save_path) / (1024 * 1024)
+            self._log(f"  Browser: downloaded {filename} ({size_mb:.1f} MB)")
             context.close()
             return save_path, filename
 

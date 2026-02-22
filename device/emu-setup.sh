@@ -61,15 +61,17 @@ echo ""
 # Step 0: Load config if it exists
 # ============================================================================
 NAS_HOST=""
+NAS_USER="root"
 NAS_EXPORT=""
 NAS_MOUNT="/tmp/nas-mount"
+NAS_ROM_SUBDIR="roms"
 NAS_SAVE_SUBDIR="saves"
 BACKUP_KEEP=10
 
 if [ -f "$CONFIG_FILE" ]; then
     info "Loading settings from config.env..."
     # Source only specific known variables (safe)
-    eval "$(grep -E '^(NAS_HOST|NAS_EXPORT|NAS_MOUNT|NAS_SAVE_SUBDIR|BACKUP_KEEP)=' "$CONFIG_FILE")"
+    eval "$(grep -E '^(NAS_HOST|NAS_USER|NAS_EXPORT|NAS_MOUNT|NAS_ROM_SUBDIR|NAS_SAVE_SUBDIR|BACKUP_KEEP)=' "$CONFIG_FILE")"
     log "Config loaded."
 else
     warn "No config.env found. We'll ask you a few questions instead."
@@ -679,10 +681,129 @@ if [ -n "$NAS_HOST" ]; then
 fi
 
 # ============================================================================
-# Step 8: SSH Key Setup
+# Step 8: NAS Game Library (Optional)
 # ============================================================================
 echo ""
-echo -e "${BOLD}Step 8: Remote Access (SSH)${NC}"
+echo -e "${BOLD}Step 8: NAS Game Library (Optional)${NC}"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "Browse your entire NAS game library from ES-DE without downloading"
+echo "everything first. Games download on-demand when you select them."
+echo ""
+
+SETUP_NAS_LIBRARY=false
+
+if [ -n "$NAS_HOST" ] && [ -n "$NAS_EXPORT" ]; then
+    ask "Set up NAS game library browsing? [Y/n]: "
+    read -r NAS_LIB_INPUT
+    if [[ ! "$NAS_LIB_INPUT" =~ ^[Nn] ]]; then
+        SETUP_NAS_LIBRARY=true
+    fi
+else
+    info "Skipping — no NAS configured. Set up NAS connection first (Step 7)."
+fi
+
+if [ "$SETUP_NAS_LIBRARY" = true ]; then
+    # --- Check SSHFS is available ---
+    if ! command -v sshfs &>/dev/null; then
+        warn "SSHFS is not installed. Checking if we can install it..."
+        if command -v flatpak &>/dev/null; then
+            warn "SSHFS needs to be available on the base system."
+        fi
+        warn "Try: sudo pacman -S sshfs  (or install via your package manager)"
+        warn "Skipping NAS library setup until SSHFS is available."
+        SETUP_NAS_LIBRARY=false
+    else
+        log "SSHFS is available — no sudo needed for NAS mount."
+    fi
+fi
+
+if [ "$SETUP_NAS_LIBRARY" = true ]; then
+    # --- SSH key for NAS ---
+    NAS_USER="${NAS_USER:-root}"
+    if [ ! -f "$HOME/.ssh/id_ed25519" ]; then
+        info "Generating SSH key for NAS access..."
+        mkdir -p "$HOME/.ssh"
+        ssh-keygen -t ed25519 -f "$HOME/.ssh/id_ed25519" -N "" -q
+        log "SSH key created."
+    fi
+
+    echo ""
+    info "We need to set up passwordless SSH to your NAS."
+    info "This will copy your SSH key to ${NAS_USER}@${NAS_HOST}."
+    echo ""
+    ask "Copy SSH key to NAS now? [Y/n]: "
+    read -r COPY_NAS_KEY
+    if [[ ! "$COPY_NAS_KEY" =~ ^[Nn] ]]; then
+        ssh-copy-id -o StrictHostKeyChecking=accept-new "${NAS_USER}@${NAS_HOST}" 2>/dev/null && \
+            log "SSH key copied to NAS." || \
+            warn "Couldn't copy key automatically. You may need to enter the NAS password."
+    fi
+
+    # --- Verify SSH access ---
+    info "Testing SSH connection to NAS..."
+    if ssh -o BatchMode=yes -o ConnectTimeout=5 "${NAS_USER}@${NAS_HOST}" "echo ok" &>/dev/null; then
+        log "Passwordless SSH to NAS is working."
+    else
+        warn "SSH to NAS failed. NAS library won't work until SSH access is set up."
+        warn "Run: ssh-copy-id ${NAS_USER}@${NAS_HOST}"
+    fi
+
+    # Create mount point
+    mkdir -p "$NAS_MOUNT"
+
+    # --- Install NAS library scripts ---
+    info "Installing NAS library tools..."
+    cp "$SCRIPT_DIR/nas-mount.sh" "$EMU_BASE/tools/"
+    cp "$SCRIPT_DIR/deckdock-launcher.sh" "$EMU_BASE/tools/"
+    cp "$SCRIPT_DIR/nas-library-sync.sh" "$EMU_BASE/tools/"
+    chmod +x "$EMU_BASE/tools/nas-mount.sh"
+    chmod +x "$EMU_BASE/tools/deckdock-launcher.sh"
+    chmod +x "$EMU_BASE/tools/nas-library-sync.sh"
+    log "NAS mount, launcher wrapper, and sync scripts installed."
+
+    # --- Flatpak override: expose /tmp to RetroArch ---
+    # RetroArch's Flatpak sandbox isolates /tmp by default. Since NAS symlinks
+    # point to /tmp/nas-roms, RetroArch can't follow them without this override.
+    if flatpak list --app 2>/dev/null | grep -q org.libretro.RetroArch; then
+        flatpak override --user --filesystem=/tmp org.libretro.RetroArch 2>/dev/null && \
+            log "RetroArch Flatpak: added /tmp filesystem access." || \
+            warn "Couldn't set RetroArch Flatpak override."
+    fi
+
+    # --- Install systemd services ---
+    cp "$SCRIPT_DIR/nas-mount.service" "$SYSTEMD_DIR/"
+    cp "$SCRIPT_DIR/nas-library-sync.service" "$SYSTEMD_DIR/"
+    cp "$SCRIPT_DIR/nas-library-sync.timer" "$SYSTEMD_DIR/"
+    systemctl --user daemon-reload
+
+    # Enable SSHFS mount service
+    systemctl --user enable nas-mount.service 2>/dev/null && \
+        log "NAS mount service enabled (SSHFS — no sudo needed)." || \
+        warn "Couldn't enable mount service."
+
+    # Enable library sync timer
+    systemctl --user enable --now nas-library-sync.timer 2>/dev/null && \
+        log "Library sync timer enabled (every 5 minutes)." || \
+        warn "Couldn't enable sync timer."
+
+    # --- Try initial mount + sync ---
+    info "Attempting initial NAS mount via SSHFS..."
+    if bash "$EMU_BASE/tools/nas-mount.sh" mount 2>/dev/null; then
+        log "NAS mounted at $NAS_MOUNT"
+        info "Running initial library sync..."
+        bash "$EMU_BASE/tools/nas-library-sync.sh"
+        log "NAS library sync complete. Your games should now appear in ES-DE."
+    else
+        warn "Couldn't mount NAS right now. The sync will run automatically"
+        warn "next time you're on your home network."
+    fi
+fi
+
+# ============================================================================
+# Step 9: SSH Key Setup
+# ============================================================================
+echo ""
+echo -e "${BOLD}Step 9: Remote Access (SSH)${NC}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "DeckDock works best when your PC can send files to this device"
 echo "without needing a password every time. This uses SSH keys."
@@ -714,10 +835,10 @@ else
 fi
 
 # ============================================================================
-# Step 9: Save Settings
+# Step 10: Save Settings
 # ============================================================================
 echo ""
-echo -e "${BOLD}Step 9: Saving Settings${NC}"
+echo -e "${BOLD}Step 10: Saving Settings${NC}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 LOCAL_CONFIG="$DECKDOCK_DIR/config.env"
@@ -728,18 +849,20 @@ LOCAL_CONFIG="$DECKDOCK_DIR/config.env"
     echo "BACKUP_KEEP=$BACKUP_KEEP"
     if [ -n "$NAS_HOST" ]; then
         echo "NAS_HOST=$NAS_HOST"
+        echo "NAS_USER=$NAS_USER"
         echo "NAS_EXPORT=$NAS_EXPORT"
         echo "NAS_MOUNT=$NAS_MOUNT"
+        echo "NAS_ROM_SUBDIR=$NAS_ROM_SUBDIR"
         echo "NAS_SAVE_SUBDIR=$NAS_SAVE_SUBDIR"
     fi
 } > "$LOCAL_CONFIG"
 log "Settings saved to $LOCAL_CONFIG"
 
 # ============================================================================
-# Step 10: BIOS Check
+# Step 11: BIOS Check
 # ============================================================================
 echo ""
-echo -e "${BOLD}Step 10: BIOS File Check${NC}"
+echo -e "${BOLD}Step 11: BIOS File Check${NC}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "Some emulators need BIOS files (firmware dumped from real consoles)"
 echo "to work properly. Let's check what you've got."
@@ -780,6 +903,12 @@ fi
 if [ -n "$NAS_HOST" ]; then
 echo "  NAS backups    Saves also get pushed to your NAS at $NAS_HOST"
 echo "                 when you're on your home network."
+echo ""
+fi
+if [ "$SETUP_NAS_LIBRARY" = true ]; then
+echo "  NAS Library    Your full NAS game library is browsable in ES-DE."
+echo "                 Select a game — it downloads automatically and plays."
+echo "                 Syncs every 5 minutes when NAS is reachable."
 echo ""
 fi
 if [ "$SETUP_TAILSCALE" = true ]; then

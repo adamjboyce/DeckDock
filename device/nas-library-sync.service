@@ -1,0 +1,9 @@
+[Unit]
+Description=DeckDock — NAS Library Sync
+After=nas-mount.service
+Wants=nas-mount.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash %h/Emulation/tools/nas-library-sync.sh
+ExecStartPost=/usr/bin/python3 %h/Emulation/tools/fetch-boxart.py
