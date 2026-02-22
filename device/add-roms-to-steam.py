@@ -2,41 +2,60 @@
 """
 Add ROM games to Steam as non-Steam shortcuts.
 Regenerates shortcuts.vdf from scratch each run.
-Uses EmuDeck launcher scripts. Run with Steam CLOSED.
+Launches emulators directly (flatpak/AppImage) — bypasses EmuDeck launcher
+wrappers which run git pull + cloud sync on every launch, causing hangs.
 """
-import os, struct, re, shutil, binascii
+import os, struct, re, shutil, binascii, glob
 
 STEAM_USERDATA = os.path.expanduser("~/.local/share/Steam/userdata")
 ROMS_DIR = os.path.expanduser("~/Emulation/roms")
-LAUNCHERS = os.path.expanduser("~/Emulation/tools/launchers")
 NAS_MOUNT = "/tmp/nas-roms"
+APPS_DIR = os.path.expanduser("~/Applications")
+FLATPAK = "/usr/bin/flatpak"
+APPIMAGE_LAUNCHER = os.path.expanduser("~/Emulation/tools/launch-appimage.sh")
 
-SYSTEM_LAUNCHER = {
-    "3ds": "azahar.sh", "n3ds": "azahar.sh",
-    "dreamcast": "retroarch.sh",
-    "gamecube": "dolphin-emu.sh", "gc": "dolphin-emu.sh",
-    "gb": "retroarch.sh", "gba": "retroarch.sh", "gbc": "retroarch.sh",
-    "genesis": "retroarch.sh", "megadrive": "retroarch.sh",
-    "n64": "retroarch.sh",
-    "nds": "melonds.sh",
-    "nes": "retroarch.sh", "famicom": "retroarch.sh",
-    "ps2": "pcsx2-qt.sh",
-    "psp": "ppsspp.sh",
-    "psx": "duckstation.sh",
-    "saturn": "retroarch.sh",
-    "snes": "retroarch.sh", "sfc": "retroarch.sh",
-    "wii": "dolphin-emu.sh",
-    "atari2600": "retroarch.sh",
-    "atari5200": "retroarch.sh",
-    "atari7800": "retroarch.sh",
-    "segacd": "retroarch.sh", "megacd": "retroarch.sh",
-    "sega32x": "retroarch.sh",
-    "pcengine": "retroarch.sh",
-    "mastersystem": "retroarch.sh",
-    "gamegear": "retroarch.sh",
-    "mame": "retroarch.sh",
-    "xbox": "xemu-emu.sh",
-    "scummvm": "scummvm.sh",
+# Flatpak emulators: exe = /usr/bin/flatpak, launch_opts = "run <id> <rom>"
+_FP_RETROARCH = "org.libretro.RetroArch"
+_FP_AZAHAR = "org.azahar_emu.Azahar"
+_FP_DOLPHIN = "org.DolphinEmu.dolphin-emu"
+_FP_MELONDS = "net.kuribo64.melonDS"
+_FP_PCSX2 = "net.pcsx2.PCSX2"
+_FP_PPSSPP = "org.ppsspp.PPSSPP"
+_FP_XEMU = "app.xemu.xemu"
+_FP_SCUMMVM = "org.scummvm.ScummVM"
+
+# Map systems to (exe_path, flatpak_id_or_none).
+# - Flatpak: exe = /usr/bin/flatpak, id is set
+# - AppImage: exe = AppImage path, id is None
+def _find_appimage(name):
+    """Find an AppImage by name prefix in ~/Applications/."""
+    matches = glob.glob(os.path.join(APPS_DIR, name + "*.AppImage"))
+    return matches[0] if matches else None
+
+SYSTEM_EMULATOR = {
+    "3ds": "deckdock:azahar", "n3ds": "deckdock:azahar",
+    "dreamcast": _FP_RETROARCH,
+    "gamecube": _FP_DOLPHIN, "gc": _FP_DOLPHIN,
+    "gb": _FP_RETROARCH, "gba": _FP_RETROARCH, "gbc": _FP_RETROARCH,
+    "genesis": _FP_RETROARCH, "megadrive": _FP_RETROARCH,
+    "n64": _FP_RETROARCH,
+    "nds": _FP_MELONDS,
+    "nes": _FP_RETROARCH, "famicom": _FP_RETROARCH,
+    "ps2": "appimage:pcsx2-Qt",
+    "psp": _FP_PPSSPP,
+    "psx": "appimage:DuckStation",  # AppImage only, no flatpak
+    "saturn": _FP_RETROARCH,
+    "snes": _FP_RETROARCH, "sfc": _FP_RETROARCH,
+    "wii": _FP_DOLPHIN,
+    "atari2600": _FP_RETROARCH, "atari5200": _FP_RETROARCH,
+    "atari7800": _FP_RETROARCH,
+    "segacd": _FP_RETROARCH, "megacd": _FP_RETROARCH,
+    "sega32x": _FP_RETROARCH,
+    "pcengine": _FP_RETROARCH,
+    "mastersystem": _FP_RETROARCH, "gamegear": _FP_RETROARCH,
+    "mame": _FP_RETROARCH,
+    "xbox": _FP_XEMU,
+    "scummvm": _FP_SCUMMVM,
 }
 
 ROM_EXTENSIONS = {
@@ -163,18 +182,26 @@ def main():
         ))
         idx += 1
 
+    # Entry 2: Plex HTPC
+    entries.append(build_entry(
+        idx, "Plex HTPC",
+        '"' + FLATPAK + '"',
+        '"' + os.path.expanduser("~/") + '"',
+        launch_opts="run tv.plex.PlexHTPC",
+        tags=["Media"],
+    ))
+    idx += 1
+
     # Scan ROM directories for games
     added = 0
-    seen_names = {"EmulationStationDE", "DeckDock Storage Manager"}
+    seen_names = {"EmulationStationDE", "DeckDock Storage Manager", "Plex HTPC"}
 
     for system in sorted(os.listdir(ROMS_DIR)):
         sys_dir = os.path.join(ROMS_DIR, system)
-        if not os.path.isdir(sys_dir) or system not in SYSTEM_LAUNCHER:
+        if not os.path.isdir(sys_dir) or system not in SYSTEM_EMULATOR:
             continue
 
-        launcher = os.path.join(LAUNCHERS, SYSTEM_LAUNCHER[system])
-        if not os.path.exists(launcher):
-            continue
+        emu_ref = SYSTEM_EMULATOR[system]
 
         files = sorted(os.listdir(sys_dir))
         fileset = set(f.lower() for f in files)
@@ -217,9 +244,28 @@ def main():
             if gamename in seen_names:
                 continue
 
-            exe = '"' + launcher + '"'
-            startdir = '"' + os.path.dirname(launcher) + '/"'
-            launch_opts = '"' + rom_path + '"'
+            # Resolve exe + launch options based on emulator type
+            if emu_ref.startswith("deckdock:"):
+                # DeckDock launcher script (handles zip extraction, etc.)
+                launcher_name = emu_ref.split(":", 1)[1]
+                launcher_path = os.path.expanduser(
+                    f"~/Emulation/tools/launchers/deckdock-{launcher_name}.sh")
+                exe = '"' + launcher_path + '"'
+                launch_opts = '"' + rom_path + '"'
+            elif emu_ref.startswith("appimage:"):
+                appimage_name = emu_ref.split(":", 1)[1]
+                appimage_path = _find_appimage(appimage_name)
+                if not appimage_path:
+                    print(f"  ! AppImage not found: {appimage_name}*.AppImage")
+                    continue
+                # Wrapper keeps bash as parent so Steam reaper tracks it
+                exe = '"' + APPIMAGE_LAUNCHER + '"'
+                launch_opts = '"' + appimage_path + '" "' + rom_path + '"'
+            else:
+                # Flatpak: exe is /usr/bin/flatpak, launch_opts = run <id> "<rom>"
+                exe = '"' + FLATPAK + '"'
+                launch_opts = 'run ' + emu_ref + ' "' + rom_path + '"'
+            startdir = '"' + os.path.dirname(rom_path) + '/"'
             tag = SYSTEM_LABELS.get(system, system)
 
             entries.append(build_entry(
