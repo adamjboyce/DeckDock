@@ -21,6 +21,10 @@ DeckDock is a tool suite for setting up a retro gaming library on Linux handheld
 
 CLI: `--phase N` (resume from phase), `--skip-config` (reuse config.env), `--verify` (health check only)
 
+**BIOS files:** Run `./bios-push.sh /path/to/bios/folder` from PC. Scans your local BIOS files, identifies them via MD5 hash + filename pattern matching (catches renamed files), and SCPs to the correct locations on the device. `--dry-run` to preview without pushing. Device-side `bios-check.sh` validates what's installed.
+
+**No-NAS workflow:** Staging directory (`~/nas-staging/<system>/`) is a local ROM library organized by system. Run `./rom-push.sh` to bulk-push ROMs to the device. Supports `--system <slug>` filter, `--dry-run`, and alternate source dirs. Files stay on PC. Skips files already on device. Regenerates Steam shortcuts after push.
+
 **Fallback:** Run `device/emu-setup.sh` directly on the device in Desktop Mode (same 11 steps, runs locally).
 
 **Development:** Run `./deploy.sh` for quick script re-deploy after code changes (no setup, just push + verify).
@@ -79,6 +83,8 @@ DeckDock/
   config.example.env      # Template with all vars
   setup.sh                # Unified PC-side setup (11 phases, all via SSH)
   deploy.sh               # Quick re-deploy for development
+  bios-push.sh            # PC-side BIOS transfer (MD5 + name matching, SCP)
+  rom-push.sh             # PC-side bulk ROM push to device (SCP)
   crawler/
     crawler-gui.py        # Main crawler + web GUI
     title-systems.json    # Curated title→system database
