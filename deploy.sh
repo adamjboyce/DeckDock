@@ -122,6 +122,7 @@ if [ "$MODE" != "verify" ]; then
     push "$SCRIPT_DIR/device/launch-appimage.sh"           "$REMOTE_TOOLS"
     push "$SCRIPT_DIR/device/fetch-boxart.py"              "$REMOTE_TOOLS"
     push "$SCRIPT_DIR/device/add-roms-to-steam.py"         "$REMOTE_TOOLS"
+    push "$SCRIPT_DIR/device/bios-check.sh"                "$REMOTE_TOOLS"
 
     # --- Launcher scripts to ~/Emulation/tools/launchers/ ---
     push "$SCRIPT_DIR/device/deckdock-azahar.sh"           "$REMOTE_LAUNCHERS"
@@ -224,6 +225,7 @@ SCRIPTS_CHECK=$($SSH_CMD "$DEVICE_HOST" '
     [ -f ~/Emulation/tools/save-restore.sh ] || missing="$missing save-restore.sh"
     [ -f ~/Emulation/tools/launch-appimage.sh ] || missing="$missing launch-appimage.sh"
     [ -f ~/Emulation/tools/launchers/deckdock-azahar.sh ] || missing="$missing deckdock-azahar.sh"
+    [ -f ~/Emulation/tools/bios-check.sh ] || missing="$missing bios-check.sh"
     echo "${missing:-none}"
 ' 2>/dev/null)
 

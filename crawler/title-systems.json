@@ -327,6 +327,24 @@
     "primal rage",
     "rampage",
     "rampart",
-    "resident evil"
+    "resident evil",
+    "demon's souls",
+    "drakengard 3",
+    "fight night champion",
+    "killzone 2",
+    "littlebigplanet 2",
+    "littlebigplanet - game of the year edition",
+    "midnight club - los angeles - complete edition",
+    "minecraft - playstation 3 edition",
+    "nba 2k11"
+  ],
+  "wii": [
+    "blur"
+  ],
+  "arcade": [
+    "dead or alive 5"
+  ],
+  "nes": [
+    "deadpool"
   ]
 }
