@@ -177,6 +177,9 @@ NAS_ROM_SUBDIR = cfg("NAS_ROM_SUBDIR", "roms")
 # Trickle push from config
 TRICKLE_PUSH = cfg("TRICKLE_PUSH", "false").lower() == "true"
 
+# Track script modification time for hot-reload on start
+_SCRIPT_MTIME = os.path.getmtime(__file__)
+
 # IGDB API config (optional — for auto-classifying unknown game titles)
 IGDB_CLIENT_ID = cfg("IGDB_CLIENT_ID", "")
 IGDB_CLIENT_SECRET = cfg("IGDB_CLIENT_SECRET", "")
@@ -1002,6 +1005,18 @@ class CrawlJob:
         parsed = urllib.parse.urlparse(url)
         return parsed.netloc == self.domain or parsed.netloc == ""
 
+    def _is_child_or_pagination(self, link, parent_url):
+        """True if link is under parent_url's path, or is a paginated variant."""
+        link_p = urllib.parse.urlparse(link)
+        url_p = urllib.parse.urlparse(parent_url)
+        url_path = url_p.path.rstrip("/")
+        link_path = link_p.path.rstrip("/")
+        if link_path.startswith(url_path + "/"):
+            return True
+        if link_path == url_path and link_p.query and link_p.query != url_p.query:
+            return True
+        return False
+
     def _normalize_url(self, url, page_url):
         if url.startswith("//"):
             url = f"{self.scheme}:{url}"
@@ -1011,7 +1026,10 @@ class CrawlJob:
             url = urllib.parse.urljoin(page_url, url)
         parsed = urllib.parse.urlparse(url)
         path = parsed.path.rstrip("/") or "/"
-        return f"{parsed.scheme}://{parsed.netloc}{path}"
+        normalized = f"{parsed.scheme}://{parsed.netloc}{path}"
+        if parsed.query:
+            normalized += f"?{parsed.query}"
+        return normalized
 
     def _is_downloadable(self, url):
         path = urllib.parse.urlparse(url).path.lower()
@@ -1297,6 +1315,79 @@ class CrawlJob:
                             if test_url != disc1_url:
                                 sibling_urls.append((disc_n, test_url))
                                 break
+
+        # Stage 3 — Vault page scrape: parse media array from source page.
+        # For synthetic POST URLs (from Vimm), the 4th pipe segment is the
+        # source page URL. Fetch it, parse const media=[...], and construct
+        # synthetic POST URLs for sibling disc mediaIds.
+        if not sibling_urls:
+            # Find disc1 URL if not already found (covers re-crawl scenarios
+            # where the download URL is a POST synthetic URL)
+            if not disc1_url:
+                for u in self.downloaded_files:
+                    if not isinstance(u, str):
+                        continue
+                    if u.startswith("POST|"):
+                        # For POST URLs, check if the referer page name
+                        # contains the game's base name
+                        parts = u.split("|", 3)
+                        referer = parts[3] if len(parts) > 3 else ""
+                        referer_lower = urllib.parse.unquote(referer).lower()
+                        if base_lower in referer_lower:
+                            disc1_url = u
+                            break
+                    else:
+                        u_path = urllib.parse.urlparse(u).path
+                        u_fname = urllib.parse.unquote(u_path.split("/")[-1])
+                        if u_fname == filepath.name or base_lower in u_fname.lower():
+                            disc1_url = u
+                            break
+
+            if disc1_url and "|" in disc1_url:
+                parts = disc1_url.split("|", 3)
+                if len(parts) >= 4:
+                    source_page = parts[3]
+                    disc1_params = dict(urllib.parse.parse_qsl(parts[2]))
+                    disc1_mid = disc1_params.get("mediaId", "")
+                    form_action = parts[1]
+
+                    self._log(f"  Multi-disc: scraping source page for media array...")
+                    try:
+                        html = self._fetch_page_html(source_page)
+                        if html:
+                            page_soup = BeautifulSoup(html, "html.parser")
+                            for script in page_soup.find_all("script"):
+                                script_text = script.string or ""
+                                media_match = re.search(
+                                    r'const\s+media\s*=\s*(\[.+?\]);', script_text)
+                                if not media_match:
+                                    continue
+                                try:
+                                    media_list = json.loads(media_match.group(1))
+                                except (json.JSONDecodeError, ValueError):
+                                    continue
+                                if not isinstance(media_list, list) or len(media_list) <= 1:
+                                    continue
+                                for entry in media_list:
+                                    if not isinstance(entry, dict):
+                                        continue
+                                    mid = str(entry.get("ID", ""))
+                                    if not mid or mid == disc1_mid:
+                                        continue
+                                    disc_post = urllib.parse.urlencode({"mediaId": mid})
+                                    disc_url = f"POST|{form_action}|{disc_post}|{source_page}"
+                                    if disc_url not in self.downloaded_files:
+                                        disc_label = entry.get("Label", f"media {mid}")
+                                        self._log(f"  Multi-disc: found {disc_label} (media {mid})")
+                                        # We don't know the exact disc number from the media array,
+                                        # so assign sequentially after disc 1
+                                        next_disc = max(existing_discs.keys(), default=1) + 1
+                                        while next_disc in existing_discs:
+                                            next_disc += 1
+                                        sibling_urls.append((next_disc, disc_url))
+                                break  # Only process first media array
+                    except Exception as e:
+                        self._log(f"  Multi-disc: scrape failed — {e}")
 
         # Download any discovered sibling discs
         for disc_n, url in sorted(sibling_urls):
@@ -1955,6 +2046,107 @@ class CrawlJob:
                 self.discovered_files.append(synthetic_url)
                 self.files_found = len(self.discovered_files) + len(self.downloaded_files)
 
+        # --- Scan Vimm's JS media array for additional disc mediaIds ---
+        # Vimm embeds all disc data in: const media=[{"ID":5122,...},{"ID":13604,...}]
+        # The form scanner captures only the default disc's mediaId.
+        # This pass discovers additional discs for multi-disc games.
+        for script in soup.find_all("script"):
+            script_text = script.string or ""
+            media_match = re.search(r'const\s+media\s*=\s*(\[.+?\]);', script_text)
+            if not media_match:
+                continue
+            try:
+                media_list = json.loads(media_match.group(1))
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(media_list, list) or len(media_list) <= 1:
+                continue  # Single disc — already handled by form scanner
+
+            # Find the form action URL from any download form on this page
+            form_action = None
+            for form in soup.find_all("form"):
+                action = form.get("action", "").strip()
+                method = (form.get("method", "GET") or "GET").upper()
+                if action and action != "#" and method == "POST":
+                    form_action = self._normalize_url(action, url)
+                    break
+            if not form_action:
+                continue
+
+            # Collect mediaIds already discovered by the form scanner
+            existing_ids = set()
+            for disc_url in self.discovered_files + list(self.downloaded_files):
+                if not isinstance(disc_url, str) or not disc_url.startswith("POST|"):
+                    continue
+                disc_params = dict(urllib.parse.parse_qsl(disc_url.split("|", 3)[2]))
+                mid = disc_params.get("mediaId")
+                if mid:
+                    existing_ids.add(mid)
+
+            # Get game name for logging
+            title_tag = soup.find("title")
+            h1 = soup.find("h1")
+            game_name = h1.get_text(strip=True) if h1 else (
+                title_tag.get_text(strip=True) if title_tag else "")
+            for prefix in ["The Vault:", "The Vault", "Vimm's Lair:",
+                           "Vimm's Lair"]:
+                if game_name.startswith(prefix):
+                    game_name = game_name[len(prefix):]
+            game_name = re.sub(r'[<>:"/\\|?*]', '', game_name).strip()
+
+            for entry in media_list:
+                if not isinstance(entry, dict):
+                    continue
+                mid = str(entry.get("ID", ""))
+                if not mid or mid in existing_ids:
+                    continue
+                # Build synthetic POST URL for this disc
+                disc_params = urllib.parse.urlencode({"mediaId": mid})
+                disc_synthetic = f"POST|{form_action}|{disc_params}|{url}"
+                if disc_synthetic not in self.downloaded_files and \
+                   disc_synthetic not in self.discovered_files:
+                    disc_label = entry.get("Label", f"Disc (media {mid})")
+                    self._log(f"  Found (media): {game_name} — {disc_label}")
+                    self.discovered_files.append(disc_synthetic)
+                    self.files_found = len(self.discovered_files) + len(self.downloaded_files)
+            break  # Only process the first media array found
+
+        # --- Scan inline <script> for JS-embedded download URLs ---
+        # Sites like CoolROM hide download URLs in JavaScript (e.g.,
+        # window.location.href = "https://dl.coolrom.com.au/dl/ID/TOKEN/TS/")
+        # instead of <a href> or <form> tags.
+        if not self.discovered_files[pre_scan_count:]:
+            for script in soup.find_all("script"):
+                script_text = script.string or ""
+                # Match URLs pointing to a download subdomain or /dl/ path
+                for m in re.finditer(
+                    r'(?:window\.(?:location\.href|open)\s*[=(]\s*["\'])'
+                    r'(https?://dl\.[^"\']+)',
+                    script_text
+                ):
+                    dl_url = m.group(1)
+                    if dl_url in self.downloaded_files or dl_url in self.discovered_files:
+                        continue
+                    # Derive a filename from the page title
+                    title_tag = soup.find("title")
+                    h1 = soup.find("h1")
+                    game_name = (h1.get_text(strip=True) if h1
+                                 else title_tag.get_text(strip=True) if title_tag
+                                 else "")
+                    for prefix in ["CoolROM.com -", "CoolROM -"]:
+                        if game_name.startswith(prefix):
+                            game_name = game_name[len(prefix):].strip()
+                    game_name = re.sub(r'[<>:"/\\|?*]', '', game_name).strip()
+                    if game_name:
+                        self._log(f"  Found (js): {game_name}")
+                    else:
+                        self._log(f"  Found (js): {dl_url}")
+                    self.discovered_files.append(dl_url)
+                    self.files_found = len(self.discovered_files) + len(self.downloaded_files)
+                    break  # one download URL per page is enough
+                if self.discovered_files[pre_scan_count:]:
+                    break
+
         # --- Download immediately: files found on THIS page ---
         # Instead of queuing everything up for a post-crawl download phase,
         # we download as we go. Each system's games are downloaded before
@@ -1995,7 +2187,7 @@ class CrawlJob:
                 last_segment = link_path.split("/")[-1] if link_path else ""
                 if last_segment.isdigit():
                     detail_pages.append(link)
-                elif link.startswith(self.base_url) or link.startswith(url):
+                elif link.startswith(self.base_url) and self._is_child_or_pagination(link, url):
                     nav_pages.append(link)
 
         # Crawl detail/game pages first (they have download forms)
@@ -2183,10 +2375,14 @@ class CrawlJob:
         if url in self.downloaded_files:
             return True
 
-        # For POST form downloads, we don't know the filepath until we start
+        # For POST form downloads, we don't know the filepath until we start.
+        # Same for extensionless download URLs (e.g., dl.coolrom.com.au/dl/ID/TOKEN/)
+        # where the real filename comes from Content-Disposition.
         is_form_download = url.startswith("POST|")
+        is_extensionless = (not is_form_download
+                            and not self._is_downloadable(url))
 
-        if not is_form_download:
+        if not is_form_download and not is_extensionless:
             filepath = self._url_to_filepath(url)
             if filepath is None:
                 return False
@@ -2211,11 +2407,11 @@ class CrawlJob:
         try:
             resp, server_filename, referer = self._do_download_request(url)
 
-            # For form downloads, determine filepath now from server response
-            if is_form_download:
+            # For form/extensionless downloads, determine filepath from server response
+            if is_form_download or is_extensionless:
                 if server_filename:
                     fname = server_filename
-                else:
+                elif is_form_download:
                     # Fallback: extract game name from the synthetic URL
                     parts = url.split("|", 3)
                     params = dict(urllib.parse.parse_qsl(parts[2])) if len(parts) > 2 else {}
@@ -2227,6 +2423,12 @@ class CrawlJob:
                         fname += ".zip"
                     elif "octet-stream" in ct:
                         fname += ".bin"
+                else:
+                    # Extensionless URL — derive name from URL path or content-type
+                    path_name = Path(urllib.parse.urlparse(url).path.rstrip("/")).name
+                    ct = resp.headers.get("content-type", "")
+                    ext = ".zip" if "zip" in ct else ".bin" if "octet" in ct else ""
+                    fname = f"{path_name}{ext}" if path_name else f"download{ext}"
 
                 system = self._get_system_for_file(fname, url=referer)
                 filepath = self.output_dir / system / fname
@@ -2235,7 +2437,7 @@ class CrawlJob:
                 self.current_file = name
                 self._log(f"  Filename: {name}")
 
-                # Dedup check for form downloads
+                # Dedup check for form/extensionless downloads
                 filepath, should_download = self._dedup_filepath(filepath, url)
                 if not should_download:
                     resp.close()
@@ -2576,6 +2778,17 @@ class GUIHandler(http.server.BaseHTTPRequestHandler):
             return
         if not url.startswith("http"):
             url = "https://" + url
+
+        # If the source file has been modified since this process started,
+        # restart the process to pick up code changes.
+        if os.path.getmtime(__file__) > _SCRIPT_MTIME:
+            os.environ["CRAWLER_AUTOSTART"] = json.dumps(params)
+            self._json({"status": "restarting"})
+            def _restart():
+                time.sleep(0.5)
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            threading.Thread(target=_restart, daemon=False).start()
+            return
 
         depth = int(params.get("depth", DEFAULT_DEPTH))
         delay = int(params.get("delay", DEFAULT_DELAY))
@@ -3014,6 +3227,20 @@ function startCrawl() {
     body: JSON.stringify({url, depth: parseInt(depth), delay: parseInt(delay), system, js_mode: jsMode})
   }).then(r => r.json()).then(data => {
     if (data.error) { alert(data.error); resetButtons(); return; }
+    if (data.status === 'restarting') {
+      document.getElementById('phaseBadge').textContent = 'Reloading\u2026';
+      document.getElementById('phaseBadge').className = 'phase-badge phase-crawling';
+      (function waitForRestart() {
+        setTimeout(() => {
+          fetch('/api/status').then(r => r.json()).then(d => {
+            if (d.status === 'crawling' || d.status === 'downloading') {
+              startPolling();
+            } else { waitForRestart(); }
+          }).catch(() => waitForRestart());
+        }, 800);
+      })();
+      return;
+    }
     startPolling();
   }).catch(e => { alert('Failed: ' + e); resetButtons(); });
 }
@@ -3122,7 +3349,11 @@ HTML = HTML.replace("DELAY_PLACEHOLDER", str(DEFAULT_DELAY))
 
 
 if __name__ == "__main__":
-    print(f"DeckDock Crawler GUI running at http://localhost:{PORT}")
+    autostart_json = os.environ.pop("CRAWLER_AUTOSTART", None)
+    if autostart_json:
+        print(f"DeckDock Crawler GUI restarted (code reload)")
+    else:
+        print(f"DeckDock Crawler GUI running at http://localhost:{PORT}")
     print(f"Open in your browser to start crawling.")
     print(f"Downloads save to {STAGING_BASE}/<system>/")
     if TRICKLE_PUSH:
@@ -3134,4 +3365,33 @@ if __name__ == "__main__":
         allow_reuse_address = True
 
     server = ReusableServer(("0.0.0.0", PORT), GUIHandler)
+
+    # If restarting with autostart params, kick off the job immediately
+    if autostart_json:
+        try:
+            params = json.loads(autostart_json)
+            url = params.get("url", "").strip()
+            if url:
+                if not url.startswith("http"):
+                    url = "https://" + url
+                depth = int(params.get("depth", DEFAULT_DEPTH))
+                delay = int(params.get("delay", DEFAULT_DELAY))
+                system = params.get("system", "auto")
+                js_mode = bool(params.get("js_mode", False))
+                current_job = CrawlJob(
+                    url, STAGING_BASE, max_depth=depth, delay=delay,
+                    system=system, js_mode=js_mode,
+                )
+                def run_job():
+                    try:
+                        current_job.run()
+                    except Exception as e:
+                        current_job.status = "error"
+                        current_job._log(f"ERROR: {e}")
+                job_thread = threading.Thread(target=run_job, daemon=True)
+                job_thread.start()
+                print(f"Auto-started crawl: {url}")
+        except Exception as e:
+            print(f"Autostart failed: {e}")
+
     server.serve_forever()
