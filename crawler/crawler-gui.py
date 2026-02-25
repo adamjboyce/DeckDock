@@ -2221,13 +2221,17 @@ class CrawlJob:
             time.sleep(0.3)
             self.crawl_page(link, depth)
 
-    def _browser_download(self, page_url):
-        """Use Playwright to navigate to a page and click the Download button.
+    def _browser_download(self, page_url, form_action=None, form_data=None):
+        """Use Playwright to navigate to a page and trigger a download.
 
         Returns (filepath, filename) on success, or (None, None) on failure.
         Handles slow downloads (e.g., Vimm throttles to ~600 KB/s, so a 2GB
         file takes ~55 min). The download itself has no timeout — only the
         page navigation and button detection have timeouts.
+
+        If form_action and form_data are provided, injects a POST form and
+        submits it (bypasses broken/removed download buttons). Falls back to
+        finding and clicking an existing download button if injection fails.
         """
         if not HAS_PLAYWRIGHT:
             self._log("  Playwright not available for browser download")
@@ -2252,35 +2256,66 @@ class CrawlJob:
             page.goto(page_url, timeout=30000, wait_until="domcontentloaded")
             page.wait_for_timeout(3000)
 
-            # Look for a download button/submit
-            download_btn = None
-            for selector in [
-                'button:has-text("Download")',
-                'input[type="submit"][value*="Download"]',
-                'a:has-text("Download")',
-                'button[type="submit"]',
-                'form[method="POST"] button',
-            ]:
+            download = None
+
+            # Strategy 1: Inject form and submit (when we have form data)
+            # This bypasses broken/removed download buttons — the browser has
+            # real cookies and session from navigating to the game page.
+            if form_action and form_data:
+                self._log(f"  Browser: injecting download form...")
+                # Build hidden input elements for each form field
+                inputs_js = ""
+                for key, val in form_data.items():
+                    safe_key = key.replace("'", "\\'")
+                    safe_val = str(val).replace("'", "\\'")
+                    inputs_js += (
+                        f"var i=document.createElement('input');"
+                        f"i.type='hidden';i.name='{safe_key}';"
+                        f"i.value='{safe_val}';f.appendChild(i);"
+                    )
+                # Escape form action for JS string
+                safe_action = form_action.replace("'", "\\'")
                 try:
-                    btn = page.locator(selector).first
-                    if btn.is_visible(timeout=2000):
-                        download_btn = btn
-                        break
-                except Exception:
-                    continue
+                    with page.expect_download(timeout=120000) as dl_info:
+                        page.evaluate(
+                            f"var f=document.createElement('form');"
+                            f"f.method='POST';f.action='{safe_action}';"
+                            f"{inputs_js}"
+                            f"document.body.appendChild(f);f.submit();"
+                        )
+                    download = dl_info.value
+                except Exception as e:
+                    self._log(f"  Browser: form injection failed — {e}")
+                    # Fall through to Strategy 2
 
-            if not download_btn:
-                self._log("  Browser: no download button found")
-                context.close()
-                return None, None
+            # Strategy 2: Find and click an existing download button
+            if download is None:
+                download_btn = None
+                for selector in [
+                    'button:has-text("Download")',
+                    'input[type="submit"][value*="Download"]',
+                    'a:has-text("Download")',
+                    'button[type="submit"]',
+                    'form[method="POST"] button',
+                ]:
+                    try:
+                        btn = page.locator(selector).first
+                        if btn.is_visible(timeout=2000):
+                            download_btn = btn
+                            break
+                    except Exception:
+                        continue
 
-            # 120s for download event to START (not finish) — covers slow
-            # server responses and redirect chains
-            self._log("  Browser: clicking download button...")
-            with page.expect_download(timeout=120000) as dl_info:
-                download_btn.click()
+                if not download_btn:
+                    self._log("  Browser: no download button found")
+                    context.close()
+                    return None, None
 
-            download = dl_info.value
+                self._log("  Browser: clicking download button...")
+                with page.expect_download(timeout=120000) as dl_info:
+                    download_btn.click()
+                download = dl_info.value
+
             filename = download.suggested_filename
             save_path = os.path.join(dl_dir, filename)
 
@@ -2367,7 +2402,8 @@ class CrawlJob:
                     raise
 
                 self._log("  Trying browser download (Playwright)...")
-                saved_path, filename = self._browser_download(referer)
+                saved_path, filename = self._browser_download(
+                    referer, form_action=action_url, form_data=form_data)
                 if saved_path and os.path.exists(saved_path):
                     # Return a fake response-like wrapper so download_file
                     # can handle it uniformly
