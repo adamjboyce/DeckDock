@@ -2437,12 +2437,37 @@ class CrawlJob:
             if referer:
                 headers["Referer"] = referer
 
-            # Try the direct POST first (works on most sites)
+            # Try GET first — some sites (Vimm) accept GET with query params
+            # even though the HTML form says POST. GET is simpler and avoids
+            # bot protection that blocks POST requests.
+            get_url = action_url
+            if form_data:
+                sep = "&" if "?" in action_url else "?"
+                get_url = action_url + sep + urllib.parse.urlencode(form_data)
+            try:
+                resp = self.session.get(get_url, headers=headers,
+                                        stream=True, timeout=300)
+                if resp.status_code < 400:
+                    ct = resp.headers.get("content-type", "")
+                    if "text/html" not in ct:
+                        cd = resp.headers.get("content-disposition", "")
+                        filename = None
+                        if "filename=" in cd:
+                            match = re.search(
+                                r'filename[*]?=["\']?([^"\';\r\n]+)', cd)
+                            if match:
+                                filename = urllib.parse.unquote(
+                                    match.group(1).strip())
+                        return resp, filename, referer
+                resp.close()
+            except requests.RequestException:
+                pass
+
+            # Try the direct POST (works on most sites)
             try:
                 resp = self.session.post(action_url, data=form_data,
                                          headers=headers, stream=True, timeout=300)
                 if resp.status_code in (400, 403, 429, 503):
-                    # Bot protection detected — fall back to Playwright
                     resp.close()
                     raise requests.RequestException(
                         f"Bot protection (HTTP {resp.status_code})")
@@ -2456,7 +2481,6 @@ class CrawlJob:
                     if match:
                         filename = urllib.parse.unquote(match.group(1).strip())
 
-                # Sanity check: if response is HTML, it's probably an error page
                 ct = resp.headers.get("content-type", "")
                 if "text/html" in ct:
                     resp.close()
@@ -2465,7 +2489,6 @@ class CrawlJob:
                 return resp, filename, referer
 
             except requests.RequestException as e:
-                # Fall back to Playwright browser download
                 self._log(f"  Direct POST blocked: {e}")
                 if not referer:
                     raise
@@ -2474,8 +2497,6 @@ class CrawlJob:
                 saved_path, filename = self._browser_download(
                     referer, form_action=action_url, form_data=form_data)
                 if saved_path and os.path.exists(saved_path):
-                    # Return a fake response-like wrapper so download_file
-                    # can handle it uniformly
                     return _FileResponse(saved_path), filename, referer
                 else:
                     raise requests.RequestException(
