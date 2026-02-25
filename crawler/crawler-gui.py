@@ -1850,10 +1850,27 @@ class CrawlJob:
         system = self._get_system_for_file(filename, url=url)
         return self.output_dir / system / filename
 
+    # JavaScript snippet injected into every Playwright page to hide
+    # automation signals (navigator.webdriver, CDP runtime, etc.)
+    _STEALTH_JS = """
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+        Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+        window.chrome = {runtime: {}};
+        const origQuery = window.navigator.permissions.query;
+        window.navigator.permissions.query = (params) =>
+            params.name === 'notifications'
+                ? Promise.resolve({state: Notification.permission})
+                : origQuery(params);
+    """
+
     def _init_browser(self):
-        """Lazy-init Playwright browser for JS rendering.
-        Also recovers if the browser process died unexpectedly."""
-        if not self.js_mode:
+        """Lazy-init Playwright browser for JS rendering and downloads.
+        Also recovers if the browser process died unexpectedly.
+        Applies stealth patches to avoid headless browser detection."""
+        # Allow init for downloads even if js_mode is off — downloads
+        # need a browser when direct POST is blocked by bot protection.
+        if not self.js_mode and not HAS_PLAYWRIGHT:
             return
         # Check if existing browser is still alive
         if self._browser is not None:
@@ -1867,11 +1884,18 @@ class CrawlJob:
                 self._page = None
         if self._pw is None:
             self._pw = sync_playwright().start()
-            self._browser = self._pw.chromium.launch(headless=True)
+            self._browser = self._pw.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                ],
+            )
             self._page = self._browser.new_page()
+            self._page.add_init_script(self._STEALTH_JS)
             self._page.set_extra_http_headers({
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                              "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+                              "AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
             })
 
     def _close_browser(self):
@@ -2248,6 +2272,7 @@ class CrawlJob:
                               "AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
             })
             page = context.new_page()
+            page.add_init_script(self._STEALTH_JS)
             # Only apply default timeout to navigation/element finding, not downloads
             page.set_default_navigation_timeout(30000)
             page.set_default_timeout(30000)
@@ -2258,12 +2283,32 @@ class CrawlJob:
 
             download = None
 
-            # Strategy 1: Inject form and submit (when we have form data)
-            # This bypasses broken/removed download buttons — the browser has
-            # real cookies and session from navigating to the game page.
-            if form_action and form_data:
-                self._log(f"  Browser: injecting download form...")
-                # Build hidden input elements for each form field
+            # Strategy 1: Try the page's own download form (submitDL)
+            # Some sites (Vimm) have a JS function that sets method=GET and submits.
+            # Using the real form preserves all hidden fields and the site's own logic.
+            if form_data:
+                try:
+                    has_dl_form = page.evaluate("!!document.getElementById('dl_form')")
+                    if has_dl_form:
+                        self._log("  Browser: submitting page's download form...")
+                        # Set the mediaId in the existing form, then call submitDL
+                        media_id = form_data.get("mediaId", "")
+                        if media_id:
+                            page.evaluate(
+                                f"document.querySelector('#dl_form [name=mediaId]')"
+                                f".value='{media_id}';"
+                            )
+                        with page.expect_download(timeout=120000) as dl_info:
+                            page.evaluate(
+                                "document.getElementById('dl_form').submit();"
+                            )
+                        download = dl_info.value
+                except Exception as e:
+                    self._log(f"  Browser: native form submit failed — {e}")
+
+            # Strategy 2: Inject form and submit via GET (Vimm's submitDL uses GET)
+            if download is None and form_action and form_data:
+                self._log(f"  Browser: injecting download form (GET)...")
                 inputs_js = ""
                 for key, val in form_data.items():
                     safe_key = key.replace("'", "\\'")
@@ -2273,7 +2318,31 @@ class CrawlJob:
                         f"i.type='hidden';i.name='{safe_key}';"
                         f"i.value='{safe_val}';f.appendChild(i);"
                     )
-                # Escape form action for JS string
+                safe_action = form_action.replace("'", "\\'")
+                try:
+                    with page.expect_download(timeout=120000) as dl_info:
+                        page.evaluate(
+                            f"var f=document.createElement('form');"
+                            f"f.method='GET';f.action='{safe_action}';"
+                            f"{inputs_js}"
+                            f"document.body.appendChild(f);f.submit();"
+                        )
+                    download = dl_info.value
+                except Exception as e:
+                    self._log(f"  Browser: GET form injection failed — {e}")
+
+            # Strategy 3: Inject form via POST (fallback for non-Vimm sites)
+            if download is None and form_action and form_data:
+                self._log(f"  Browser: injecting download form (POST)...")
+                inputs_js = ""
+                for key, val in form_data.items():
+                    safe_key = key.replace("'", "\\'")
+                    safe_val = str(val).replace("'", "\\'")
+                    inputs_js += (
+                        f"var i=document.createElement('input');"
+                        f"i.type='hidden';i.name='{safe_key}';"
+                        f"i.value='{safe_val}';f.appendChild(i);"
+                    )
                 safe_action = form_action.replace("'", "\\'")
                 try:
                     with page.expect_download(timeout=120000) as dl_info:
@@ -2285,10 +2354,10 @@ class CrawlJob:
                         )
                     download = dl_info.value
                 except Exception as e:
-                    self._log(f"  Browser: form injection failed — {e}")
-                    # Fall through to Strategy 2
+                    self._log(f"  Browser: POST form injection failed — {e}")
+                    # Fall through to Strategy 4
 
-            # Strategy 2: Find and click an existing download button
+            # Strategy 4: Find and click an existing download button
             if download is None:
                 download_btn = None
                 for selector in [
