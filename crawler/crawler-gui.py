@@ -2175,20 +2175,30 @@ class CrawlJob:
 
         self._save_state()
 
-        # Split links into detail pages (likely have downloads) and nav/index pages.
-        # Process detail pages FIRST so we find files before burning time on
-        # more index pages.
+        # Split links into detail pages (likely have downloads), child nav pages
+        # (deeper in the hierarchy), and pagination pages (same level, different
+        # query params).  Process detail pages FIRST so we find files before
+        # burning time on more index pages.
         detail_pages = []
-        nav_pages = []
+        child_pages = []
+        pagination_pages = []
+
+        url_parsed = urllib.parse.urlparse(url)
+        url_path = url_parsed.path.rstrip("/")
 
         for link in sorted(links):
             if self._is_same_domain(link):
-                link_path = urllib.parse.urlparse(link).path.rstrip("/")
+                link_parsed = urllib.parse.urlparse(link)
+                link_path = link_parsed.path.rstrip("/")
                 last_segment = link_path.split("/")[-1] if link_path else ""
                 if last_segment.isdigit():
                     detail_pages.append(link)
                 elif link.startswith(self.base_url) and self._is_child_or_pagination(link, url):
-                    nav_pages.append(link)
+                    # Separate children (deeper path) from pagination (same path, different query)
+                    if link_path.startswith(url_path + "/"):
+                        child_pages.append(link)
+                    else:
+                        pagination_pages.append(link)
 
         # Crawl detail/game pages first (they have download forms)
         for link in detail_pages:
@@ -2197,12 +2207,19 @@ class CrawlJob:
             time.sleep(0.3)  # Light politeness delay for crawling (not downloading)
             self.crawl_page(link, self.max_depth)
 
-        # Then crawl child nav/index pages (they lead to more detail pages)
-        for link in nav_pages:
+        # Crawl child nav pages (one level deeper in the hierarchy)
+        for link in child_pages:
             if self.stop_requested:
                 return
             time.sleep(0.3)
             self.crawl_page(link, depth + 1)
+
+        # Crawl pagination pages at SAME depth (different slice of same content)
+        for link in pagination_pages:
+            if self.stop_requested:
+                return
+            time.sleep(0.3)
+            self.crawl_page(link, depth)
 
     def _browser_download(self, page_url):
         """Use Playwright to navigate to a page and click the Download button.
