@@ -230,6 +230,7 @@ _IGDB_PLATFORM_MAP = {
     62: "atarijaguar",  # Atari Jaguar
     61: "atarilynx",   # Atari Lynx (for disambiguation)
     11: "xbox",        # Xbox (for disambiguation)
+    12: "xbox360",     # Xbox 360 (for disambiguation)
     18: "nes",          # NES
     19: "snes",         # SNES
     4: "n64",           # Nintendo 64
@@ -1110,6 +1111,13 @@ class CrawlJob:
         Returns a system slug or None if no confident match.
         """
         global TITLE_DATABASE
+
+        # Layer 0: Filename tag detection (XBLA, Xbox 360)
+        fname_lower = filename.lower()
+        if "(xbla)" in fname_lower or "xbox 360" in fname_lower:
+            self._log(f"  Filename tag: '{filename}' -> xbox360")
+            return "xbox360"
+
         # Strip extension and region tags to get a clean title
         stem = Path(filename).stem
         # Remove region/revision tags: (USA), (Europe), (Disc 1), (Rev 2), (v2.01), (En,Ja,...), (T-En)

@@ -67,8 +67,8 @@ def identify_from_tracks(tracks):
 
     Heuristics:
     - Track 1 MODE2_RAW → PSX (XA sector format, definitive)
-    - Track 1 MODE1_RAW + logical_bytes > 1GB → PS2 (DVD)
-    - Track 1 MODE1_RAW → Saturn, Sega CD, Dreamcast, or PC Engine CD
+    - Track 1 MODE1_RAW → ambiguous (Saturn, Sega CD, Dreamcast, PC Engine CD)
+      These are handled by title matching in the curated DB instead.
     - All tracks AUDIO → 3DO (3DO encodes data as audio sectors)
     """
     if not tracks:
@@ -81,9 +81,11 @@ def identify_from_tracks(tracks):
         return "psx"
 
     # MODE1_RAW: could be Saturn, Sega CD, Dreamcast, PC Engine CD
-    # Can't distinguish without reading sector 0 magic bytes
+    # CHD v5 CD compressors use MAME's custom framing that can't be
+    # decompressed with Python stdlib. These titles are handled by
+    # curated DB entries (Layer 1) instead.
     if track1_type in ("MODE1_RAW", "MODE1"):
-        return None  # ambiguous
+        return None  # ambiguous from metadata alone
 
     # All-AUDIO tracks: characteristic of 3DO discs
     # (3DO, Jaguar CD, and CD-i can all have AUDIO-only layouts,

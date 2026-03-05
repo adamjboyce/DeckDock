@@ -80,7 +80,7 @@ IGDB_CLIENT_SECRET = cfg("IGDB_CLIENT_SECRET", "")
 _IGDB_PLATFORM_MAP = {
     7: "psx", 8: "ps2", 21: "gc", 29: "genesis", 32: "saturn",
     23: "dreamcast", 78: "segacd", 50: "3do", 117: "cdi",
-    62: "atarijaguar", 61: "atarilynx", 11: "xbox",
+    62: "atarijaguar", 61: "atarilynx", 11: "xbox", 12: "xbox360",
     18: "nes", 19: "snes", 4: "n64", 5: "wii",
     38: "psp", 52: "arcade", 86: "pcengine",
 }
@@ -218,6 +218,11 @@ def igdb_lookup(title):
 
 def classify_title(filename, title_db, no_match_cache):
     """Classify a single file by title. Returns (system, source) or (None, None)."""
+    # Layer 0: Filename tag detection (XBLA, Xbox 360)
+    fname_lower = filename.lower()
+    if "(xbla)" in fname_lower or "xbox 360" in fname_lower:
+        return "xbox360", "filename-tag"
+
     stem = Path(filename).stem
     clean = re.sub(r'\s*\([^)]*\)', '', stem).strip()
     title_lower = clean.lower()
@@ -267,6 +272,54 @@ def nas_list_other():
         print(f"ERROR: Failed to list NAS other/: {result.stderr.strip()}")
         return []
     return [f.strip() for f in result.stdout.strip().split("\n") if f.strip()]
+
+
+def _m3u_inherit_system(filename, classified_systems, use_nas):
+    """Inherit system from the disc files referenced in an M3U playlist.
+
+    Reads the M3U, finds disc filenames, checks if any were classified
+    in this resort run or already exist in a system directory on the NAS.
+    """
+    if use_nas:
+        remote_path = f"{NAS_EXPORT}/{NAS_ROM_SUBDIR}/other/{filename}"
+        try:
+            result = subprocess.run(
+                ["ssh", "-n", f"{NAS_USER}@{NAS_HOST}", f"cat \"{remote_path}\""],
+                capture_output=True, text=True, timeout=10,
+            )
+            lines = result.stdout.strip().splitlines()
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+    else:
+        try:
+            with open(Path("other") / filename) as f:
+                lines = f.read().strip().splitlines()
+        except OSError:
+            return None
+
+    for line in lines:
+        disc_name = line.strip()
+        if not disc_name or disc_name.startswith("#"):
+            continue
+        # Check if this disc was classified in the current run
+        if disc_name in classified_systems:
+            return classified_systems[disc_name]
+        # Check NAS system directories for this disc
+        if use_nas:
+            for system in ("psx", "saturn", "segacd", "pcengine", "dreamcast",
+                           "3do", "ps2", "cdi"):
+                remote = f"{NAS_EXPORT}/{NAS_ROM_SUBDIR}/{system}/{disc_name}"
+                try:
+                    check = subprocess.run(
+                        ["ssh", "-n", f"{NAS_USER}@{NAS_HOST}",
+                         f"test -f \"{remote}\""],
+                        capture_output=True, timeout=5,
+                    )
+                    if check.returncode == 0:
+                        return system
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
+    return None
 
 
 def nas_move_file(filename, system):
@@ -839,7 +892,7 @@ def _classify_chd_via_metadata(filename, use_nas):
     CHD v5 metadata contains track type info:
     - MODE2_RAW track 1 → PSX
     - All AUDIO tracks → 3DO
-    - MODE1_RAW → ambiguous (Saturn, Sega CD, Dreamcast, etc.)
+    - MODE1_RAW → tries sector 0 decompression for Saturn/Sega CD/etc.
 
     For NAS files, runs chd-identify.py on the NAS via SSH.
     """
@@ -850,7 +903,7 @@ def _classify_chd_via_metadata(filename, use_nas):
             result = subprocess.run(
                 ["ssh", "-n", f"{NAS_USER}@{NAS_HOST}",
                  f"python3 /tmp/chd-identify.py \"{remote_path}\""],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True, text=True, timeout=30,
             )
             if not result.stdout.strip():
                 return None
@@ -1134,6 +1187,23 @@ def main():
             moves.append((filename, system, source))
         else:
             unmatched.append(filename)
+
+    # M3U inheritance: classify playlists by their referenced disc files
+    classified_systems = {fn: sys for fn, sys, _ in moves}
+    still_unmatched = []
+    for filename in unmatched:
+        if not filename.lower().endswith(".m3u"):
+            still_unmatched.append(filename)
+            continue
+        # Read M3U contents to find referenced disc files
+        disc_system = _m3u_inherit_system(filename, classified_systems, args.nas)
+        if disc_system:
+            print(f"  M3U inherit: {filename} -> {disc_system}/")
+            moves.append((filename, disc_system, "m3u-inherit"))
+        else:
+            print(f"  M3U inherit: {filename} -> no match")
+            still_unmatched.append(filename)
+    unmatched = still_unmatched
 
     # Report
     if moves:
