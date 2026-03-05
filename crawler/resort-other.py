@@ -216,10 +216,20 @@ def igdb_lookup(title):
     return None
 
 
+_EXT_TO_SYSTEM = {
+    ".cci": "3ds", ".3ds": "3ds", ".cia": "3ds",
+}
+
+
 def classify_title(filename, title_db, no_match_cache):
     """Classify a single file by title. Returns (system, source) or (None, None)."""
-    # Layer 0: Filename tag detection (XBLA, Xbox 360)
+    # Layer 0: Extension-based classification (unambiguous formats)
     fname_lower = filename.lower()
+    ext = Path(fname_lower).suffix
+    if ext in _EXT_TO_SYSTEM:
+        return _EXT_TO_SYSTEM[ext], "extension"
+
+    # Layer 0: Filename tag detection (XBLA, Xbox 360)
     if "(xbla)" in fname_lower or "xbox 360" in fname_lower:
         return "xbox360", "filename-tag"
 

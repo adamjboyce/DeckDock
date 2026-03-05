@@ -240,7 +240,8 @@
     "lion king, the - simba",
     "mtv sports - t.j",
     "miss spider",
-    "winnie the pooh"
+    "winnie the pooh",
+    "bottom of the 9th '99"
   ],
   "ps2": [
     "silent hill 4 - the room",
@@ -731,7 +732,8 @@
     "sega smash pack",
     "ring, the - terror",
     "rippin",
-    "sword of the berserk - guts"
+    "sword of the berserk - guts",
+    "charge 'n blast"
   ],
   "segacd": [
     "lunar - the silver star",
@@ -850,7 +852,10 @@
     "3rd degree",
     "7th guest, the",
     "ultimate noah",
-    "xplora 1 - peter gabriel"
+    "xplora 1 - peter gabriel",
+    "joker's wild!, the",
+    "merlin's apprentice",
+    "richard scarry's best neighborhood disc ever!"
   ],
   "_no_match": [
     "007 - nightfire",
@@ -5523,7 +5528,55 @@
     "yu-gi-oh! 5d",
     "zoda",
     "bug!",
-    "mr. chin"
+    "mr. chin",
+    "act college search '92, the",
+    "all-star slammin' d-ball",
+    "alone in the dark - one-eyed jack's revenge",
+    "aquanaut's holiday",
+    "arcade's greatest hits - the atari collection 1",
+    "army men - sarge's heroes",
+    "bases loaded '96 - double header",
+    "big ol' bass 2",
+    "builder's block",
+    "cali's geo tools",
+    "charlie's angels",
+    "chocobo's dungeon 2",
+    "dakar 2 - the world's ultimate rally",
+    "disney 2-pack - frozen - olaf's quest + big hero 6 - battle in the bay",
+    "disney frozen - olaf's quest",
+    "disney presents tigger's honey hunt",
+    "disney's 102 dalmatians - puppies to the rescue",
+    "disney-pixar a bug's life",
+    "emperor's new clothes, the",
+    "fairly oddparents, the - breakin' da rules",
+    "frogger 2 - swampy's revenge",
+    "gabrielle's ghostly groove 3d",
+    "irving berlin's white christmas",
+    "kirby's extra epic yarn",
+    "lego legends of chima - laval's journey",
+    "layton's mystery journey - katrielle and the millionaires' conspiracy",
+    "legends of oz - dorothy's return",
+    "let's ride - best in breed 3d",
+    "mat hoffman's pro bmx",
+    "midway's greatest arcade hits - volume 1",
+    "monty python's more naughty bits",
+    "nikoli's pencil puzzle",
+    "noah's ark",
+    "pinball hall of fame - the williams' collection",
+    "playboy's complete massage",
+    "poochy & yoshi's woolly world",
+    "private lesson series - rock guitar - a beginner's guide",
+    "rand mcnally's america - united states atlas",
+    "rhythm thief & the emperor's treasure",
+    "shantae and the pirate's curse",
+    "shari lewis lamb chop's play-along! action songs",
+    "south park - chef's luv shack",
+    "spyro - a hero's tail",
+    "teenage mutant ninja turtles - master splinter's training pack",
+    "tom clancy's ghost recon - shadow wars",
+    "wayne's world",
+    "zero escape - virtue's last reward",
+    "shonen jump's one piece - grand adventure"
   ],
   "wii": [
     "alex kidd in miracle world",
@@ -5878,7 +5931,6 @@
     "time pilot",
     "tutankham",
     "vanguard",
-    "venture",
     "warlords",
     "wizard of wor",
     "astro chase",
@@ -6136,7 +6188,8 @@
     "mickey",
     "oscar",
     "porky",
-    "spanky"
+    "spanky",
+    "yoshi's new island"
   ],
   "pcengine": [
     "legendary axe, the",
@@ -6319,5 +6372,8 @@
     "warbirds",
     "zarlor mercenary",
     "bill & ted"
+  ],
+  "xbox360": [
+    "hot wheels - world's best driver"
   ]
 }
