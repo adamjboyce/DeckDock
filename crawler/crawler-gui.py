@@ -244,6 +244,7 @@ _IGDB_PLATFORM_MAP = {
 _MAPPED_SYSTEMS = set(_IGDB_PLATFORM_MAP.values())
 
 _TITLE_DB_PATH = Path(__file__).resolve().parent / "title-systems.json"
+_MIN_PATTERN_LEN = 5  # Substring matching on shorter patterns causes mass false positives
 
 # In-memory IGDB OAuth token cache
 _igdb_token = None
@@ -273,6 +274,8 @@ def _load_title_database():
         if not isinstance(titles, list):
             continue
         for title in titles:
+            if len(title) < _MIN_PATTERN_LEN:
+                continue  # skip dangerously short substring patterns
             pairs.append((title.lower(), system))
 
     # Sort by pattern length descending — longest match wins
@@ -294,6 +297,11 @@ def _load_no_match_cache():
 
 def _save_title_to_database(title_lower, system):
     """Append a new title mapping to the curated JSON database."""
+    if len(title_lower) < _MIN_PATTERN_LEN:
+        print(f"[TITLE-DB] Skipping too-short pattern '{title_lower}' for {system} "
+              f"(min {_MIN_PATTERN_LEN} chars)", file=sys.stderr)
+        return
+
     try:
         with open(_TITLE_DB_PATH, "r") as f:
             db = json.load(f)
