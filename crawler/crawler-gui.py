@@ -66,9 +66,15 @@ def load_config():
 
     config_path = Path(config_path)
     if not config_path.exists():
-        print(f"WARNING: Config file not found at {config_path}")
-        print("Copy config.example.env to config.env and fill in your values.")
-        print("Falling back to defaults.")
+        msg = (
+            f"\n{'='*60}\n"
+            f"  CONFIG NOT FOUND: {config_path}\n"
+            f"  NAS push, trickle push, and IGDB will not work.\n"
+            f"  Copy config.example.env to config.env and restart.\n"
+            f"{'='*60}\n"
+        )
+        print(msg, file=sys.stderr)
+        config["_CONFIG_MISSING"] = "true"
         return config
 
     with open(config_path, "r") as f:
@@ -176,6 +182,27 @@ NAS_ROM_SUBDIR = cfg("NAS_ROM_SUBDIR", "roms")
 
 # Trickle push from config
 TRICKLE_PUSH = cfg("TRICKLE_PUSH", "false").lower() == "true"
+
+# Startup config validation — catch silent misconfigurations
+def _validate_config():
+    issues = []
+    if cfg("_CONFIG_MISSING"):
+        issues.append("config.env not found — running with defaults only")
+    if TRICKLE_PUSH and not NAS_HOST:
+        issues.append("TRICKLE_PUSH=true but NAS_HOST is empty — pushes will silently fail")
+    if TRICKLE_PUSH and not NAS_EXPORT:
+        issues.append("TRICKLE_PUSH=true but NAS_EXPORT is empty — pushes will silently fail")
+    if NAS_HOST and not NAS_EXPORT:
+        issues.append("NAS_HOST set but NAS_EXPORT is empty — NAS push won't know where to write")
+    if issues:
+        banner = f"\n{'='*60}\n  CONFIG PROBLEMS:\n"
+        for issue in issues:
+            banner += f"    - {issue}\n"
+        banner += f"{'='*60}\n"
+        print(banner, file=sys.stderr)
+    return issues
+
+_CONFIG_ISSUES = _validate_config()
 
 # Track script modification time for hot-reload on start
 _SCRIPT_MTIME = os.path.getmtime(__file__)
@@ -1712,6 +1739,11 @@ class CrawlJob:
         if not NAS_HOST or not NAS_USER or not NAS_EXPORT:
             self._nas_reachable = False
             self._nas_check_time = now
+            if not hasattr(self, '_nas_config_warned'):
+                print("[TRICKLE] NAS config incomplete — trickle push disabled. "
+                      "Check NAS_HOST, NAS_USER, NAS_EXPORT in config.env",
+                      file=sys.stderr)
+                self._nas_config_warned = True
             return False
 
         try:
@@ -1729,6 +1761,14 @@ class CrawlJob:
         self._nas_check_time = now
         if not self._nas_reachable:
             self._log("[TRICKLE] NAS not reachable, skipping push")
+            if not hasattr(self, '_nas_unreachable_warned'):
+                print(f"[TRICKLE] Cannot reach NAS at {NAS_USER}@{NAS_HOST} — "
+                      f"trickle pushes will queue locally until NAS is back",
+                      file=sys.stderr)
+                self._nas_unreachable_warned = True
+        else:
+            # NAS came back — reset the warning so it fires again if it drops
+            self._nas_unreachable_warned = False
         return self._nas_reachable
 
     def _trickle_push(self, filepath):
@@ -2898,7 +2938,16 @@ class GUIHandler(http.server.BaseHTTPRequestHandler):
     def _serve_status(self):
         global current_job
         if current_job is None:
-            self._json({"status": "idle", "log": []})
+            self._json({
+                "status": "idle",
+                "log": [],
+                "config": {
+                    "trickle_push": TRICKLE_PUSH,
+                    "nas_host": NAS_HOST or None,
+                    "nas_configured": bool(NAS_HOST and NAS_EXPORT),
+                    "issues": _CONFIG_ISSUES,
+                },
+            })
         else:
             self._json(current_job.get_progress())
 
@@ -3500,9 +3549,16 @@ if __name__ == "__main__":
     print(f"Open in your browser to start crawling.")
     print(f"Downloads save to {STAGING_BASE}/<system>/")
     if TRICKLE_PUSH:
-        print(f"Trickle push: ENABLED (files auto-push to NAS after download)")
+        if NAS_HOST and NAS_EXPORT:
+            print(f"Trickle push: ENABLED → {NAS_USER}@{NAS_HOST}:{NAS_EXPORT}/{NAS_ROM_SUBDIR}/")
+        else:
+            print(f"Trickle push: ENABLED but NAS config missing — pushes will fail!",
+                  file=sys.stderr)
     else:
         print(f"Trickle push: disabled (use 'Push to NAS' button for batch push)")
+    if not _CONFIG_ISSUES:
+        print(f"Config: OK")
+    print()
 
     class ReusableServer(http.server.HTTPServer):
         allow_reuse_address = True
