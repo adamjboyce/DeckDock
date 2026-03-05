@@ -901,6 +901,9 @@ class CrawlJob:
         self.downloaded_files = set()
         self.failed_files = set()
         self.discovered_files = []
+        # System hints: {synthetic_url -> system_slug} — from page-level metadata
+        # (e.g., Vimm page title "Frogger (PS1)" → "psx")
+        self._url_system_hints = {}
         # Dedup registry: {filename -> {url, size, sha256}} — catches same-name collisions
         self.file_registry = {}
         self.dupes_skipped = 0
@@ -1137,6 +1140,53 @@ class CrawlJob:
             _save_no_match(title_lower)
             _NO_MATCH_CACHE.add(title_lower)
             return None
+
+    # Page-level system labels → system slugs (for sites that put system in
+    # page titles, e.g., Vimm "Frogger (PS1)", "Sonic (Genesis)")
+    _SYSTEM_HINT_MAP = {
+        "ps1": "psx", "psx": "psx", "playstation": "psx",
+        "ps2": "ps2", "playstation 2": "ps2",
+        "ps3": "ps3", "playstation 3": "ps3",
+        "psp": "psp",
+        "snes": "snes", "super nintendo": "snes", "super famicom": "snes",
+        "nes": "nes", "famicom": "nes",
+        "n64": "n64", "nintendo 64": "n64",
+        "gc": "gc", "gamecube": "gc", "game cube": "gc",
+        "wii": "wii", "wii u": "wiiu", "wiiu": "wiiu",
+        "nds": "nds", "nintendo ds": "nds", "ds": "nds",
+        "3ds": "3ds", "nintendo 3ds": "3ds",
+        "gb": "gb", "game boy": "gb", "gameboy": "gb",
+        "gbc": "gbc", "game boy color": "gbc", "gameboy color": "gbc",
+        "gba": "gba", "game boy advance": "gba", "gameboy advance": "gba",
+        "genesis": "genesis", "mega drive": "genesis", "megadrive": "genesis",
+        "sega cd": "segacd", "segacd": "segacd", "mega cd": "segacd",
+        "saturn": "saturn", "sega saturn": "saturn",
+        "dreamcast": "dreamcast",
+        "master system": "mastersystem", "sms": "mastersystem",
+        "game gear": "gamegear", "gamegear": "gamegear",
+        "32x": "sega32x", "sega 32x": "sega32x",
+        "atari 2600": "atari2600", "atari 5200": "atari5200",
+        "atari 7800": "atari7800", "lynx": "atarilynx",
+        "jaguar": "atarijaguar",
+        "pc engine": "pcengine", "turbografx-16": "pcengine", "tg16": "pcengine",
+        "xbox": "xbox",
+        "arcade": "arcade", "neo geo": "arcade", "neo-geo": "arcade",
+        "colecovision": "coleco", "coleco": "coleco",
+        "3do": "3do", "cd-i": "cdi", "cdi": "cdi",
+    }
+
+    def _extract_system_hint(self, game_name):
+        """Extract system slug from a page-level game name like 'Frogger (PS1)'.
+
+        Looks for a parenthesized system label at the end of the name.
+        Returns system slug or None.
+        """
+        # Match last parenthesized group: "Game Name (PS1)" → "PS1"
+        m = re.search(r'\(([^)]+)\)\s*$', game_name)
+        if not m:
+            return None
+        label = m.group(1).strip().lower()
+        return self._SYSTEM_HINT_MAP.get(label)
 
     def _get_system_for_file(self, filename, url=None):
         """Determine which system folder a file belongs in."""
@@ -2110,6 +2160,12 @@ class CrawlJob:
                 self.discovered_files.append(synthetic_url)
                 self.files_found = len(self.discovered_files) + len(self.downloaded_files)
 
+                # Extract system hint from page-level game name
+                # (e.g., "Frogger (PS1)" → "psx", "Sonic (Genesis)" → "genesis")
+                hint_system = self._extract_system_hint(game_name)
+                if hint_system:
+                    self._url_system_hints[synthetic_url] = hint_system
+
         # --- Scan Vimm's JS media array for additional disc mediaIds ---
         # Vimm embeds all disc data in: const media=[{"ID":5122,...},{"ID":13604,...}]
         # The form scanner captures only the default disc's mediaId.
@@ -2173,6 +2229,11 @@ class CrawlJob:
                     self._log(f"  Found (media): {game_name} — {disc_label}")
                     self.discovered_files.append(disc_synthetic)
                     self.files_found = len(self.discovered_files) + len(self.downloaded_files)
+
+                    # Carry system hint to multi-disc entries
+                    hint_system = self._extract_system_hint(game_name)
+                    if hint_system:
+                        self._url_system_hints[disc_synthetic] = hint_system
             break  # Only process the first media array found
 
         # --- Scan inline <script> for JS-embedded download URLs ---
@@ -2613,7 +2674,12 @@ class CrawlJob:
                     ext = ".zip" if "zip" in ct else ".bin" if "octet" in ct else ""
                     fname = f"{path_name}{ext}" if path_name else f"download{ext}"
 
-                system = self._get_system_for_file(fname, url=referer)
+                # Check page-level system hint first (e.g., Vimm title "Frogger (PS1)")
+                system = self._url_system_hints.get(url)
+                if system:
+                    self._log(f"  System (page hint): {system}")
+                else:
+                    system = self._get_system_for_file(fname, url=referer)
                 filepath = self.output_dir / system / fname
                 filepath.parent.mkdir(parents=True, exist_ok=True)
                 name = filepath.name
