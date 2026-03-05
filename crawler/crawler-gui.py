@@ -1854,6 +1854,13 @@ class CrawlJob:
         if not filepath.exists():
             return False
 
+        # Block formats that should have been converted by _post_process
+        _blocked = {".7z", ".rar"}
+        if filepath.suffix.lower() in _blocked:
+            self._log(f"[TRICKLE] BLOCKED: {filepath.name} is {filepath.suffix} — "
+                      f"post-processing should have converted this. File kept locally.")
+            return False
+
         # Check NAS reachability
         if not self._is_nas_reachable():
             return False

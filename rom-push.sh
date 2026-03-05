@@ -109,8 +109,8 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 info "Source: $SOURCE_DIR"
 
-# Skip patterns: crawler state, partial downloads, m3u playlists
-SKIP_PATTERN='\.crawler-state\.json$|\.part$|\.m3u$'
+# Skip patterns: crawler state, partial downloads, m3u playlists, unconverted archives
+SKIP_PATTERN='\.crawler-state\.json$|\.part$|\.m3u$|\.7z$|\.rar$'
 
 # Find system subdirectories containing pushable files
 declare -a SYSTEMS=()

@@ -52,7 +52,7 @@ if [ ! -d "$STAGING_DIR" ]; then
 fi
 
 # Count files to push (exclude state files, partial downloads, and directories)
-FILE_COUNT=$(find "$STAGING_DIR" -type f ! -name ".crawler-state.json" ! -name "*.part" | wc -l)
+FILE_COUNT=$(find "$STAGING_DIR" -type f ! -name ".crawler-state.json" ! -name "*.part" ! -name "*.7z" ! -name "*.rar" | wc -l)
 
 if [ "$FILE_COUNT" -eq 0 ]; then
     log "${YELLOW}No files to push.${NC}"
@@ -108,7 +108,7 @@ while IFS= read -r -d '' file; do
         ERRORS=$((ERRORS + 1))
         log "  ${RED}Failed: ${rel_path}${NC}"
     fi
-done < <(find "$STAGING_DIR" -type f ! -name ".crawler-state.json" ! -name "*.part" -print0)
+done < <(find "$STAGING_DIR" -type f ! -name ".crawler-state.json" ! -name "*.part" ! -name "*.7z" ! -name "*.rar" -print0)
 
 # Remove empty directories (but not the staging root)
 find "$STAGING_DIR" -mindepth 1 -type d -empty -delete 2>/dev/null
