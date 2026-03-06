@@ -206,6 +206,7 @@ _CONFIG_ISSUES = _validate_config()
 
 # Track script modification time for hot-reload on start
 _SCRIPT_MTIME = os.path.getmtime(__file__)
+_PROCESS_START = time.time()
 
 # IGDB API config (optional — for auto-classifying unknown game titles)
 IGDB_CLIENT_ID = cfg("IGDB_CLIENT_ID", "")
@@ -3026,10 +3027,16 @@ class GUIHandler(http.server.BaseHTTPRequestHandler):
 
     def _serve_status(self):
         global current_job
+        process_info = {
+            "pid": os.getpid(),
+            "uptime": int(time.time() - _PROCESS_START),
+            "started": int(_PROCESS_START),
+        }
         if current_job is None:
             self._json({
                 "status": "idle",
                 "log": [],
+                "process": process_info,
                 "config": {
                     "trickle_push": TRICKLE_PUSH,
                     "nas_host": NAS_HOST or None,
@@ -3038,7 +3045,9 @@ class GUIHandler(http.server.BaseHTTPRequestHandler):
                 },
             })
         else:
-            self._json(current_job.get_progress())
+            data = current_job.get_progress()
+            data["process"] = process_info
+            self._json(data)
 
     def _handle_start(self, body):
         global current_job, job_thread
@@ -3284,9 +3293,17 @@ HTML = r"""<!DOCTYPE html>
   body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #0a0a14;
          color: #e0e0e0; min-height: 100vh; }
   .header { background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
-            padding: 28px; text-align: center; border-bottom: 2px solid #7c3aed; }
+            padding: 28px; text-align: center; border-bottom: 2px solid #7c3aed;
+            position: relative; }
   .header h1 { color: #a78bfa; font-size: 1.8em; margin-bottom: 4px; }
   .header p { color: #666; font-size: 0.9em; }
+
+  .health { position: absolute; top: 12px; right: 16px; display: flex;
+            align-items: center; gap: 6px; font-size: 0.75em; color: #666; }
+  .health-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .health-dot.ok { background: #34d399; box-shadow: 0 0 6px #34d39966; }
+  .health-dot.err { background: #f87171; box-shadow: 0 0 6px #f8717166; }
+  .health-label { white-space: nowrap; }
 
   .form-section { max-width: 700px; margin: 24px auto; padding: 0 16px; }
   .input-group { margin-bottom: 12px; }
@@ -3373,6 +3390,10 @@ HTML = r"""<!DOCTYPE html>
 <div class="header">
   <h1>DeckDock Crawler</h1>
   <p>Enter a URL, sit back, watch it work</p>
+  <div class="health" id="health">
+    <span class="health-dot" id="healthDot"></span>
+    <span class="health-label" id="healthLabel">Connecting&hellip;</span>
+  </div>
 </div>
 
 <div class="form-section">
@@ -3549,6 +3570,9 @@ function startPolling() {
 
 function updateStatus() {
   fetch('/api/status').then(r => r.json()).then(data => {
+    // Process health
+    updateHealth(true, data.process);
+
     // Stats
     document.getElementById('statPages').textContent = data.pages_crawled || 0;
     document.getElementById('statFound').textContent = data.files_found || 0;
@@ -3601,7 +3625,7 @@ function updateStatus() {
         document.getElementById('nasBtn').disabled = false;
       }
     }
-  }).catch(() => {});
+  }).catch(() => { updateHealth(false); });
 }
 
 function resetButtons() {
@@ -3609,8 +3633,37 @@ function resetButtons() {
   document.getElementById('stopBtn').disabled = true;
 }
 
+// --- Process health indicator ---
+function fmtUptime(s) {
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm';
+  var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h + 'h' + (m ? ' ' + m + 'm' : '');
+}
+
+function updateHealth(ok, proc) {
+  var dot = document.getElementById('healthDot');
+  var label = document.getElementById('healthLabel');
+  if (ok && proc) {
+    dot.className = 'health-dot ok';
+    label.textContent = 'PID ' + proc.pid + ' \u00b7 up ' + fmtUptime(proc.uptime);
+  } else {
+    dot.className = 'health-dot err';
+    label.textContent = 'Disconnected';
+  }
+}
+
+// Heartbeat: poll health even when idle (every 5s)
+var heartbeat = setInterval(function() {
+  if (polling) return; // job polling already covers it
+  fetch('/api/status').then(function(r) { return r.json(); }).then(function(d) {
+    updateHealth(true, d.process);
+  }).catch(function() { updateHealth(false); });
+}, 5000);
+
 // Check if a job is already running on page load
 fetch('/api/status').then(r => r.json()).then(data => {
+  updateHealth(true, data.process);
   if (data.status === 'crawling' || data.status === 'downloading') {
     document.getElementById('startBtn').disabled = true;
     document.getElementById('stopBtn').disabled = false;
@@ -3620,7 +3673,7 @@ fetch('/api/status').then(r => r.json()).then(data => {
     // Show final stats
     updateStatus();
   }
-});
+}).catch(function() { updateHealth(false); });
 </script>
 </body></html>"""
 
