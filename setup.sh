@@ -129,7 +129,7 @@ ROM_SYSTEMS=(
 # ── State ───────────────────────────────────────────────────────────────────
 # Config vars (populated by phase 1 or loaded from config.env)
 CFG_NAS_HOST="" ; CFG_NAS_USER="" ; CFG_NAS_EXPORT="" ; CFG_NAS_MOUNT=""
-CFG_NAS_ROM_SUBDIR="" ; CFG_NAS_SAVE_SUBDIR=""
+CFG_NAS_ROM_SUBDIR="" ; CFG_NAS_SAVE_SUBDIR="" ; CFG_NAS_TAILSCALE_HOST=""
 CFG_DEVICE_HOST="" ; CFG_BACKUP_KEEP="" ; CFG_STAGING_DIR=""
 CFG_CRAWLER_PORT="" ; CFG_DEFAULT_DELAY="" ; CFG_DEFAULT_DEPTH=""
 CFG_TRICKLE_PUSH="" ; CFG_IGDB_CLIENT_ID="" ; CFG_IGDB_CLIENT_SECRET=""
@@ -155,6 +155,7 @@ load_config() {
     CFG_NAS_MOUNT="${NAS_MOUNT:-/tmp/nas-roms}"
     CFG_NAS_ROM_SUBDIR="${NAS_ROM_SUBDIR:-roms}"
     CFG_NAS_SAVE_SUBDIR="${NAS_SAVE_SUBDIR:-saves}"
+    CFG_NAS_TAILSCALE_HOST="${NAS_TAILSCALE_HOST:-}"
     CFG_DEVICE_HOST="${DEVICE_HOST:-}"
     CFG_BACKUP_KEEP="${BACKUP_KEEP:-10}"
     CFG_STAGING_DIR="${STAGING_DIR:-\$HOME/nas-staging}"
@@ -396,6 +397,7 @@ phase_push() {
     push "$SCRIPT_DIR/device/save-backup.sh"              "$REMOTE_TOOLS"
     push "$SCRIPT_DIR/device/sleep-watcher.sh"             "$REMOTE_TOOLS"
     push "$SCRIPT_DIR/device/nas-mount.sh"                 "$REMOTE_TOOLS"
+    push "$SCRIPT_DIR/device/nas-resolve.sh"               "$REMOTE_TOOLS"
     push "$SCRIPT_DIR/device/nas-library-sync.sh"          "$REMOTE_TOOLS"
     push "$SCRIPT_DIR/device/deckdock-launcher.sh"         "$REMOTE_TOOLS"
     push "$SCRIPT_DIR/device/deckdock-nas-hook.sh"         "$REMOTE_TOOLS"
@@ -438,6 +440,7 @@ NAS_EXPORT=${CFG_NAS_EXPORT}
 NAS_MOUNT=${CFG_NAS_MOUNT}
 NAS_ROM_SUBDIR=${CFG_NAS_ROM_SUBDIR}
 NAS_SAVE_SUBDIR=${CFG_NAS_SAVE_SUBDIR}
+NAS_TAILSCALE_HOST=${CFG_NAS_TAILSCALE_HOST}
 BACKUP_KEEP=${CFG_BACKUP_KEEP}
 DCONF
 

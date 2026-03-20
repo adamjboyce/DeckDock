@@ -30,13 +30,19 @@ NAS_HOST=""
 NAS_USER="root"
 NAS_EXPORT=""
 NAS_SAVE_SUBDIR="saves"
+NAS_TAILSCALE_HOST=""
 SSH_KEY="$HOME/.ssh/id_ed25519"
 
 for config in "$HOME/DeckDock/config.env" "$HOME/Emulation/tools/config.env"; do
     if [ -f "$config" ]; then
-        eval "$(grep -E '^(NAS_HOST|NAS_USER|NAS_EXPORT|NAS_SAVE_SUBDIR)=' "$config")"
+        eval "$(grep -E '^(NAS_HOST|NAS_USER|NAS_EXPORT|NAS_SAVE_SUBDIR|NAS_TAILSCALE_HOST)=' "$config")"
         break
     fi
+done
+
+# Resolve NAS host (LAN → Tailscale fallback)
+for _resolver in "$HOME/DeckDock/device/nas-resolve.sh" "$HOME/Emulation/tools/nas-resolve.sh"; do
+    [ -f "$_resolver" ] && . "$_resolver" && break
 done
 
 NAS_SAVE_DIR="${NAS_EXPORT}/${NAS_SAVE_SUBDIR}"

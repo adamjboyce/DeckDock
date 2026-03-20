@@ -113,6 +113,7 @@ if [ "$MODE" != "verify" ]; then
     push "$SCRIPT_DIR/device/save-backup.sh"              "$REMOTE_TOOLS"
     push "$SCRIPT_DIR/device/sleep-watcher.sh"             "$REMOTE_TOOLS"
     push "$SCRIPT_DIR/device/nas-mount.sh"                 "$REMOTE_TOOLS"
+    push "$SCRIPT_DIR/device/nas-resolve.sh"               "$REMOTE_TOOLS"
     push "$SCRIPT_DIR/device/nas-library-sync.sh"          "$REMOTE_TOOLS"
     push "$SCRIPT_DIR/device/deckdock-launcher.sh"         "$REMOTE_TOOLS"
     push "$SCRIPT_DIR/device/deckdock-nas-hook.sh"         "$REMOTE_TOOLS"

@@ -15,13 +15,19 @@ NAS_HOST=""
 NAS_USER="root"
 NAS_EXPORT=""
 NAS_MOUNT="/tmp/nas-roms"
+NAS_TAILSCALE_HOST=""
 
 # Load config if available
 for config in "$HOME/DeckDock/config.env" "$HOME/Emulation/tools/config.env"; do
     if [ -f "$config" ]; then
-        eval "$(grep -E '^(NAS_HOST|NAS_USER|NAS_EXPORT|NAS_MOUNT)=' "$config")"
+        eval "$(grep -E '^(NAS_HOST|NAS_USER|NAS_EXPORT|NAS_MOUNT|NAS_TAILSCALE_HOST)=' "$config")"
         break
     fi
+done
+
+# Resolve NAS host (LAN → Tailscale fallback)
+for _resolver in "$HOME/DeckDock/device/nas-resolve.sh" "$HOME/Emulation/tools/nas-resolve.sh"; do
+    [ -f "$_resolver" ] && . "$_resolver" && break
 done
 
 ACTION="${1:-mount}"
@@ -40,10 +46,13 @@ case "$ACTION" in
             exit 1
         fi
 
-        # Can we reach the NAS?
+        # Can we reach the NAS? (ping first, fall back to SSH probe for Tailscale subnet routing)
         if ! ping -c 1 -W 3 "$NAS_HOST" >/dev/null 2>&1; then
-            echo "NAS unreachable at $NAS_HOST — skipping mount."
-            exit 0
+            if ! ssh -n -o ConnectTimeout=5 -o BatchMode=yes -o IdentityFile="$HOME/.ssh/id_ed25519" \
+                    "${NAS_USER}@${NAS_HOST}" true >/dev/null 2>&1; then
+                echo "NAS unreachable at $NAS_HOST — skipping mount."
+                exit 0
+            fi
         fi
 
         mkdir -p "$NAS_MOUNT"

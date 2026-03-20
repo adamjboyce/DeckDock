@@ -29,13 +29,25 @@ _deckdock_raise_zenity() {
 }
 
 # Load config
+NAS_TAILSCALE_HOST=""
 for _cfg in "$HOME/DeckDock/config.env" "$HOME/Emulation/tools/config.env"; do
     if [ -f "$_cfg" ]; then
-        eval "$(grep -E '^(NAS_MOUNT|NAS_HOST|NAS_USER|NAS_EXPORT)=' "$_cfg")"
+        eval "$(grep -E '^(NAS_MOUNT|NAS_HOST|NAS_USER|NAS_EXPORT|NAS_TAILSCALE_HOST)=' "$_cfg")"
         _DECKDOCK_NAS_MOUNT="${NAS_MOUNT:-$_DECKDOCK_NAS_MOUNT}"
         _DECKDOCK_NAS_HOST="${NAS_HOST:-$_DECKDOCK_NAS_HOST}"
         _DECKDOCK_NAS_USER="${NAS_USER:-$_DECKDOCK_NAS_USER}"
         _DECKDOCK_NAS_EXPORT="${NAS_EXPORT:-$_DECKDOCK_NAS_EXPORT}"
+        break
+    fi
+done
+
+# Resolve NAS host (LAN → Tailscale fallback)
+for _resolver in "$HOME/DeckDock/device/nas-resolve.sh" "$HOME/Emulation/tools/nas-resolve.sh"; do
+    if [ -f "$_resolver" ]; then
+        NAS_HOST="$_DECKDOCK_NAS_HOST"
+        NAS_USER="$_DECKDOCK_NAS_USER"
+        . "$_resolver"
+        _DECKDOCK_NAS_HOST="$NAS_HOST"
         break
     fi
 done

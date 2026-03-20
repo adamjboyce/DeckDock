@@ -39,11 +39,11 @@ CLI: `--phase N` (resume from phase), `--skip-config` (reuse config.env), `--ver
 
 ## Network
 
-| Host | IP | User | Role |
-|------|-----|------|------|
-| NAS (UniFi Drive) | 192.168.1.76 | root | Storage |
-| Device (Legion Go) | 192.168.1.160 | deck | Handheld |
-| PC (WSL2) | localhost | jolly | Dev/crawler |
+| Host | IP | Tailscale IP | User | Role |
+|------|-----|--------------|------|------|
+| NAS (UniFi Drive) | 192.168.1.76 | 100.79.178.18 | root | Storage |
+| Device (Legion Go) | 192.168.1.160 | 100.95.208.119 | deck | Handheld |
+| PC (WSL2) | localhost | 100.92.48.124 | jolly | Dev/crawler |
 
 NAS export path: `/volume/d101c9d2-02df-47dd-98b8-b47406bbe90c/.srv/.unifi-drive/DeckDock/.data`
 
@@ -116,3 +116,14 @@ DeckDock/
   docs/                   # Documentation
   .mal/                   # Project memory (gitignored)
 ```
+
+---
+
+# Architecture Map
+<!-- Added 2026-03-20. Components documented here are audited by health checks. -->
+<!-- New builds are added by Reorx after pipeline completion. -->
+<!-- Format: Name, Status, Files, Connections, Unwired items. -->
+
+## Components
+
+<!-- Components will be added here as builds complete the pipeline. -->

@@ -41,7 +41,13 @@ NAS_HOST="${NAS_HOST:-}"
 NAS_USER="${NAS_USER:-root}"
 NAS_EXPORT="${NAS_EXPORT:-}"
 NAS_SAVE_SUBDIR="${NAS_SAVE_SUBDIR:-saves}"
+NAS_TAILSCALE_HOST="${NAS_TAILSCALE_HOST:-}"
 SSH_KEY="$HOME/.ssh/id_ed25519"
+
+# Resolve NAS host (LAN → Tailscale fallback)
+for _resolver in "$HOME/DeckDock/device/nas-resolve.sh" "$HOME/Emulation/tools/nas-resolve.sh"; do
+    [ -f "$_resolver" ] && . "$_resolver" && break
+done
 
 BACKUP_DIR="$HOME/Emulation/save-backups"
 TIMESTAMP=$(date '+%Y%m%d-%H%M%S')
