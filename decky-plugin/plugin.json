@@ -1,0 +1,11 @@
+{
+  "name": "DeckDock Controller Mapper",
+  "author": "adamjboyce",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": ["controller", "deckdock", "non-steam"],
+    "description": "Auto-applies the DeckDock RPG Maker keyboard config to Windows-tagged non-Steam shortcuts. Pairs with DeckDock's add-roms-to-steam.py.",
+    "image": ""
+  }
+}

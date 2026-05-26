@@ -405,9 +405,17 @@ phase_push() {
     push "$SCRIPT_DIR/device/save-restore.sh"              "$REMOTE_TOOLS"
     push "$SCRIPT_DIR/device/deckdock-preload.sh"          "$REMOTE_TOOLS"
     push "$SCRIPT_DIR/device/launch-appimage.sh"           "$REMOTE_TOOLS"
+    push "$SCRIPT_DIR/device/launch-proton-game.sh"        "$REMOTE_TOOLS"
     push "$SCRIPT_DIR/device/fetch-boxart.py"              "$REMOTE_TOOLS"
     push "$SCRIPT_DIR/device/add-roms-to-steam.py"         "$REMOTE_TOOLS"
     push "$SCRIPT_DIR/device/bios-check.sh"                "$REMOTE_TOOLS"
+
+    # --- Controller config template for Windows games ---
+    # Source template; add-roms-to-steam.py installs CRLF-converted variants
+    # into Steam's templates dir. The DeckDock Decky plugin (decky-plugin/)
+    # then activates them per Windows game via Steam's internal IPC plus a
+    # per-game personal config write.
+    push "$SCRIPT_DIR/device/controller_switch_pro_rpgmaker.vdf" "$REMOTE_TOOLS"
 
     # --- Launcher scripts to ~/Emulation/tools/launchers/ ---
     push "$SCRIPT_DIR/device/deckdock-azahar.sh"           "$REMOTE_LAUNCHERS"

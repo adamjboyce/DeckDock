@@ -8,7 +8,12 @@
 # UI-set compat works (Steam writes accompanying metadata), but programmatic
 # mapping does not. This wrapper sidesteps the entire compat-tool path:
 # Steam launches it as a plain Linux command, the wrapper sets up the Proton
-# runtime environment, and Proton runs the Windows EXE. No DownloadingDepots.
+# runtime environment, and Proton runs the Windows EXE.
+#
+# Controller config: handled by the DeckDock Decky plugin (decky-plugin/),
+# which uses Steam's internal IPC to auto-apply the DeckDock RPG Maker
+# template at launch. The plugin is the only working path on SteamOS for
+# applying controller configs to non-Steam games without UI interaction.
 #
 # Usage (from a Steam shortcut):
 #   exe          = /home/<user>/Emulation/tools/launch-proton-game.sh

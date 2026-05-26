@@ -213,9 +213,14 @@ def install_rpgmaker_controller_template():
     ]
     written = 0
     for filename, content in variants:
+        # Steam's template parser silently rejects LF-only files (it tries to
+        # load the template, fails, and falls back to the default). Match
+        # Steam's own templates by writing CRLF — confirmed via Decky probe
+        # session 2026-05-26.
+        crlf_bytes = content.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8")
         try:
-            with open(os.path.join(STEAM_TEMPLATES_DIR, filename), "w") as f:
-                f.write(content)
+            with open(os.path.join(STEAM_TEMPLATES_DIR, filename), "wb") as f:
+                f.write(crlf_bytes)
             written += 1
         except OSError:
             continue
