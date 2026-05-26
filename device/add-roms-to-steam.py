@@ -176,41 +176,50 @@ def clean_name(filename):
     return name.strip()
 
 
-def install_rpgmaker_controller_config(steam_userid, appid_dec):
-    """Drop the RPG Maker controller config at the per-appid path Steam
-    auto-loads at game launch. Idempotent. Returns True if installed/refreshed.
+STEAM_TEMPLATES_DIR = os.path.expanduser(
+    "~/.local/share/Steam/controller_base/templates"
+)
 
-    Steam loads <controller_type>.vdf from the per-appid dir matching the
-    currently-active controller. We ship variants for the common handheld
-    controllers (switch_pro for Steam Deck and other Switch-Pro-emulating
-    devices; legion_go_s for the Legion Go). Source file declares
-    controller_switch_pro; legion_go_s is derived by substitution.
+
+def install_rpgmaker_controller_template():
+    """Install the DeckDock RPG Maker controller config as a SELECTABLE
+    template in ~/.local/share/Steam/controller_base/templates/ for both
+    common handheld controller types (switch_pro and legion_go_s).
+
+    Why not auto-apply: Steam Input on SteamOS requires UI-mediated config
+    selection for non-Steam games — there's no purely-file-based mechanism
+    that triggers Steam's "user picked this config" registration. Multiple
+    file/registry-based bypass attempts failed (per-appid drop alone, plus
+    remotecache.vdf entries with proper sha/size/mtime — Steam still routes
+    through "ShowNoControllerConfig → Last Resort Path"). The template
+    install makes our config a one-click pick per game in Properties →
+    Controller → Browse Configs → search "DeckDock RPG Maker Keyboard".
+
+    Idempotent — overwrites on each run. Returns count of variants installed.
     """
     if not os.path.exists(RPGMAKER_CONTROLLER_CONFIG):
-        return False
-    target_dir = os.path.join(
-        STEAM_CONTROLLER_CONFIGS_BASE,
-        str(steam_userid), "config", str(appid_dec)
+        return 0
+    if not os.path.isdir(STEAM_TEMPLATES_DIR):
+        return 0
+    with open(RPGMAKER_CONTROLLER_CONFIG) as f:
+        source_text = f.read()
+    legion_text = source_text.replace(
+        '"controller_type"\t\t"controller_switch_pro"',
+        '"controller_type"\t\t"controller_legion_go_s"',
     )
-    try:
-        os.makedirs(target_dir, exist_ok=True)
-        # 1) switch_pro variant (source as-is)
-        shutil.copy2(
-            RPGMAKER_CONTROLLER_CONFIG,
-            os.path.join(target_dir, "controller_switch_pro.vdf"),
-        )
-        # 2) legion_go_s variant (substitute controller_type)
-        with open(RPGMAKER_CONTROLLER_CONFIG) as f:
-            text = f.read()
-        legion_text = text.replace(
-            '"controller_type"\t\t"controller_switch_pro"',
-            '"controller_type"\t\t"controller_legion_go_s"',
-        )
-        with open(os.path.join(target_dir, "controller_legion_go_s.vdf"), "w") as f:
-            f.write(legion_text)
-        return True
-    except OSError:
-        return False
+    variants = [
+        ("controller_switch_pro_deckdock_rpgmaker.vdf", source_text),
+        ("controller_legion_go_s_deckdock_rpgmaker.vdf", legion_text),
+    ]
+    written = 0
+    for filename, content in variants:
+        try:
+            with open(os.path.join(STEAM_TEMPLATES_DIR, filename), "w") as f:
+                f.write(content)
+            written += 1
+        except OSError:
+            continue
+    return written
 
 
 def find_windows_games(games_dir):
@@ -420,10 +429,7 @@ def main():
     # Shortcut points at launch-proton-game.sh, which sets up Proton env and
     # exec's the Windows EXE. No CompatToolMapping (programmatic mapping stalls
     # Steam's launch flow at "DownloadingDepots" for non-Steam appids).
-    # Also drops the RPG Maker controller config per-appid so the gamepad
-    # auto-maps to keyboard (arrows, Z, X, Enter, Esc, Shift) on launch.
     windows_added = 0
-    controllers_installed = 0
     for win_name, win_exe, win_dir in find_windows_games(WINDOWS_GAMES_DIR):
         if win_name in seen_names:
             continue
@@ -434,7 +440,6 @@ def main():
         quoted_exe = '"' + PROTON_LAUNCHER + '"'  # the wrapper IS the exe
         quoted_dir = '"' + win_dir + '/"'
         quoted_args = '"' + win_exe + '"'         # Windows EXE as launch arg
-        win_appid = appid(quoted_exe, win_name)
         entries.append(build_entry(
             idx, win_name, quoted_exe, quoted_dir,
             launch_opts=quoted_args, tags=["Windows"],
@@ -442,10 +447,19 @@ def main():
         idx += 1
         windows_added += 1
         seen_names.add(win_name)
-        # Drop the RPG Maker controller config per-appid (Steam auto-loads it)
-        if install_rpgmaker_controller_config(users[0], win_appid):
-            controllers_installed += 1
         print(f"  + [Windows] {win_name}")
+
+    # Install RPG Maker controller config as a SELECTABLE TEMPLATE if there
+    # are any Windows games. Steam Input on SteamOS requires UI-mediated
+    # config selection for non-Steam games — no purely-file-based auto-apply
+    # path exists. Template install makes our config a one-click pick per
+    # game in Properties → Controller → Browse Configs.
+    if windows_added:
+        n_tpl = install_rpgmaker_controller_template()
+        if n_tpl:
+            print(f"Controller template installed ({n_tpl} variants). Per Windows game, "
+                  f"in Steam: Properties → Controller → Browse Configs → "
+                  f"'DeckDock RPG Maker Keyboard'")
 
     # Write complete shortcuts.vdf
     with open(vdf_path, "wb") as f:
@@ -459,9 +473,6 @@ def main():
     pinned = len(entries) - added - windows_added
     print(f"Total: {len(entries)} shortcuts "
           f"({added} ROMs + {windows_added} Windows + {pinned} pinned)")
-    if windows_added:
-        print(f"Controller configs installed for {controllers_installed}/{windows_added} Windows games "
-              f"(gamepad → keyboard auto-mapping)")
 
 
 if __name__ == "__main__":
