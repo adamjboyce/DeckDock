@@ -19,6 +19,7 @@ DeckDock automates the tedious parts of building a retro gaming library on your 
 | **NAS Support** | Own a network drive? Games push there automatically as they download. |
 | **Save Backups** | Every time you put your device to sleep, your save files get backed up. Never lose progress. |
 | **Steam Integration** | Adds all your games to Steam with box art — browse and launch from Gaming Mode. |
+| **Windows Games via Proton** | Drop RPG Maker / GameMaker / indie EXEs in `~/Games/<name>/`. They show up in the library and launch under Proton — no Desktop Mode trip. |
 | **Xbox Cloud Gaming** | Stream Xbox games on your handheld over Wi-Fi. No downloads needed. |
 | **Tailscale** | Access your device from anywhere. Push games, stream, or SSH — even away from home. |
 

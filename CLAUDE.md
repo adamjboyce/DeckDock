@@ -4,7 +4,7 @@
 
 DeckDock is a tool suite for setting up a retro gaming library on Linux handhelds (Steam Deck, Legion Go). It handles:
 - **Web crawler** (`crawler/crawler-gui.py`) — Browser-based GUI that crawls ROM sites, downloads, auto-sorts, compresses, and pushes to NAS
-- **Device scripts** (`device/`) — On-device services for ROM sorting, NAS streaming, save backups, emulator setup, Steam shortcut generation
+- **Device scripts** (`device/`) — On-device services for ROM sorting, NAS streaming, save backups, emulator setup, Steam shortcut generation (ROMs + Windows games via Proton)
 - **Unified setup** (`setup.sh`) — Single PC-side script that configures everything over SSH (11 phases)
 - **Quick deploy** (`deploy.sh`) — Fast re-deploy of scripts to device via SCP (for development)
 
@@ -95,7 +95,7 @@ DeckDock/
   device/
     emu-setup.sh          # Device-side setup fallback (runs locally)
     rom-sorter.sh         # Auto-sort ROMs by extension
-    add-roms-to-steam.py  # Generate Steam shortcuts (direct launch)
+    add-roms-to-steam.py  # Generate Steam shortcuts (ROMs + Windows games; writes shortcuts.vdf + Proton CompatToolMapping in config.vdf)
     save-backup.sh        # Save file backup on sleep
     save-restore.sh       # Save restore GUI (from NAS backups)
     bios-check.sh         # BIOS file verification

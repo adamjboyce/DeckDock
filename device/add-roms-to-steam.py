@@ -14,6 +14,26 @@ APPS_DIR = os.path.expanduser("~/Applications")
 FLATPAK = "/usr/bin/flatpak"
 APPIMAGE_LAUNCHER = os.path.expanduser("~/Emulation/tools/launch-appimage.sh")
 
+# Windows games via Proton (RPG Maker fan games, GameMaker projects, etc.)
+# Shortcuts launch through launch-proton-game.sh, which sets up Proton's
+# environment and exec's the Windows EXE. We deliberately do NOT write Steam's
+# CompatToolMapping — programmatic mapping triggers a stalled "DownloadingDepots"
+# launch flow for non-Steam game appids that have no depot.
+WINDOWS_GAMES_DIR = os.path.expanduser(
+    os.environ.get("WINDOWS_GAMES_DIR", "~/Games")
+)
+PROTON_LAUNCHER = os.path.expanduser("~/Emulation/tools/launch-proton-game.sh")
+# Steam Input controller config for RPG Maker / keyboard-driven games.
+# Copied to ~/.local/share/Steam/steamapps/common/Steam Controller Configs/
+#   <userid>/config/<appid>/controller_switch_pro.vdf for each Windows game.
+# Steam auto-loads this on launch — gamepad → keyboard (arrows/Z/X/Enter/Esc/Shift)
+RPGMAKER_CONTROLLER_CONFIG = os.path.expanduser(
+    "~/Emulation/tools/controller_switch_pro_rpgmaker.vdf"
+)
+STEAM_CONTROLLER_CONFIGS_BASE = os.path.expanduser(
+    "~/.local/share/Steam/steamapps/common/Steam Controller Configs"
+)
+
 # Flatpak emulators: exe = /usr/bin/flatpak, launch_opts = "run <id> <rom>"
 _FP_RETROARCH = "org.libretro.RetroArch"
 _FP_AZAHAR = "org.azahar_emu.Azahar"
@@ -154,6 +174,74 @@ def clean_name(filename):
     name = os.path.splitext(filename)[0]
     name = re.sub(r"\s*\(Rev\s*\d*\)", "", name)
     return name.strip()
+
+
+def install_rpgmaker_controller_config(steam_userid, appid_dec):
+    """Drop the RPG Maker controller config at the per-appid path Steam
+    auto-loads at game launch. Idempotent. Returns True if installed/refreshed.
+
+    Steam loads <controller_type>.vdf from the per-appid dir matching the
+    currently-active controller. We ship variants for the common handheld
+    controllers (switch_pro for Steam Deck and other Switch-Pro-emulating
+    devices; legion_go_s for the Legion Go). Source file declares
+    controller_switch_pro; legion_go_s is derived by substitution.
+    """
+    if not os.path.exists(RPGMAKER_CONTROLLER_CONFIG):
+        return False
+    target_dir = os.path.join(
+        STEAM_CONTROLLER_CONFIGS_BASE,
+        str(steam_userid), "config", str(appid_dec)
+    )
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+        # 1) switch_pro variant (source as-is)
+        shutil.copy2(
+            RPGMAKER_CONTROLLER_CONFIG,
+            os.path.join(target_dir, "controller_switch_pro.vdf"),
+        )
+        # 2) legion_go_s variant (substitute controller_type)
+        with open(RPGMAKER_CONTROLLER_CONFIG) as f:
+            text = f.read()
+        legion_text = text.replace(
+            '"controller_type"\t\t"controller_switch_pro"',
+            '"controller_type"\t\t"controller_legion_go_s"',
+        )
+        with open(os.path.join(target_dir, "controller_legion_go_s.vdf"), "w") as f:
+            f.write(legion_text)
+        return True
+    except OSError:
+        return False
+
+
+def find_windows_games(games_dir):
+    """Yield (display_name, exe_path, start_dir) for each Windows game folder.
+
+    Each subdirectory under games_dir is treated as one game.
+    Prefers Game.exe (RPG Maker XP/VX/MV/MZ convention); falls back to a single
+    top-level .exe if exactly one is present (avoids picking up uninstallers,
+    setup tools, or bundled utilities).
+    """
+    if not os.path.isdir(games_dir):
+        return
+    for entry in sorted(os.listdir(games_dir)):
+        path = os.path.join(games_dir, entry)
+        if not os.path.isdir(path):
+            continue
+        game_exe = os.path.join(path, "Game.exe")
+        if os.path.isfile(game_exe):
+            exe = game_exe
+        else:
+            top_exes = [
+                f for f in os.listdir(path)
+                if f.lower().endswith(".exe")
+                and os.path.isfile(os.path.join(path, f))
+            ]
+            if len(top_exes) != 1:
+                continue  # ambiguous or none — skip
+            exe = os.path.join(path, top_exes[0])
+        # Display name: folder name with trailing version suffix stripped
+        name = re.sub(r"\s+\d+(\.\d+)+\s*$", "", entry).strip() or entry
+        yield name, exe, path
 
 
 def main():
@@ -328,6 +416,37 @@ def main():
             seen_names.add(gamename)
             print(f"  + [{tag}] {gamename}")
 
+    # Scan Windows games directory — each subdir = one Proton-launched game.
+    # Shortcut points at launch-proton-game.sh, which sets up Proton env and
+    # exec's the Windows EXE. No CompatToolMapping (programmatic mapping stalls
+    # Steam's launch flow at "DownloadingDepots" for non-Steam appids).
+    # Also drops the RPG Maker controller config per-appid so the gamepad
+    # auto-maps to keyboard (arrows, Z, X, Enter, Esc, Shift) on launch.
+    windows_added = 0
+    controllers_installed = 0
+    for win_name, win_exe, win_dir in find_windows_games(WINDOWS_GAMES_DIR):
+        if win_name in seen_names:
+            continue
+        if not os.path.exists(PROTON_LAUNCHER):
+            print(f"  ! Windows game found ({win_name}) but launcher missing at "
+                  f"{PROTON_LAUNCHER} — skipping. Run setup.sh or deploy.sh to install.")
+            continue
+        quoted_exe = '"' + PROTON_LAUNCHER + '"'  # the wrapper IS the exe
+        quoted_dir = '"' + win_dir + '/"'
+        quoted_args = '"' + win_exe + '"'         # Windows EXE as launch arg
+        win_appid = appid(quoted_exe, win_name)
+        entries.append(build_entry(
+            idx, win_name, quoted_exe, quoted_dir,
+            launch_opts=quoted_args, tags=["Windows"],
+        ))
+        idx += 1
+        windows_added += 1
+        seen_names.add(win_name)
+        # Drop the RPG Maker controller config per-appid (Steam auto-loads it)
+        if install_rpgmaker_controller_config(users[0], win_appid):
+            controllers_installed += 1
+        print(f"  + [Windows] {win_name}")
+
     # Write complete shortcuts.vdf
     with open(vdf_path, "wb") as f:
         f.write(b"\x00shortcuts\x00")  # file header
@@ -337,8 +456,12 @@ def main():
 
     size = os.path.getsize(vdf_path)
     print(f"\nWrote {vdf_path} ({size} bytes)")
-    pinned = len(entries) - added
-    print(f"Total: {len(entries)} shortcuts ({added} games + {pinned} pinned)")
+    pinned = len(entries) - added - windows_added
+    print(f"Total: {len(entries)} shortcuts "
+          f"({added} ROMs + {windows_added} Windows + {pinned} pinned)")
+    if windows_added:
+        print(f"Controller configs installed for {controllers_installed}/{windows_added} Windows games "
+              f"(gamepad → keyboard auto-mapping)")
 
 
 if __name__ == "__main__":
